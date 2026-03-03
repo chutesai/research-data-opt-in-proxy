@@ -5,7 +5,13 @@ __pycache__/
 venv/
 .env
 .env.*
+!.env.example
 *.pyc
 coverage.xml
 htmlcov/
+.coverage
+dist/
+build/
+.vercel/
 INTERNAL.md
+.vercel
