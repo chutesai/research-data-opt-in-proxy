@@ -1,0 +1,11 @@
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+.env
+.env.*
+*.pyc
+coverage.xml
+htmlcov/
+INTERNAL.md
