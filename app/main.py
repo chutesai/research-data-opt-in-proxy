@@ -5,10 +5,12 @@ from dataclasses import dataclass
 
 import httpx
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import Settings, get_settings
 from app.db import create_pool, init_schema
 from app.proxy import create_proxy_router
+from app.rate_limit import RateLimitMiddleware
 from app.recorder import NoopRecorder, PostgresRecorder
 
 
@@ -76,8 +78,46 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    if resolved_settings.cors_allow_origins:
+        origins = [
+            o.strip()
+            for o in resolved_settings.cors_allow_origins.split(",")
+            if o.strip()
+        ]
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    if resolved_settings.rate_limit_requests > 0:
+        app.add_middleware(
+            RateLimitMiddleware,
+            max_requests=resolved_settings.rate_limit_requests,
+            window_seconds=resolved_settings.rate_limit_window_seconds,
+        )
+
     app.include_router(create_proxy_router())
     return app
 
 
-app = create_app()
+def _get_app() -> FastAPI:
+    """Lazy app factory for the module-level ``app`` attribute.
+
+    ``api/index.py`` (Vercel entrypoint) and ``uvicorn app.main:app`` both
+    access the module-level ``app``.  Using ``__getattr__`` defers creation
+    until first access so that importing this module during test collection
+    does not require production env vars.
+    """
+    return create_app()
+
+
+def __getattr__(name: str):
+    if name == "app":
+        global app  # noqa: PLW0603
+        app = _get_app()
+        return app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

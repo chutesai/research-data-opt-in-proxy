@@ -11,10 +11,7 @@ import orjson
 from app.models import UsageTraceCandidate
 from app.siphash import siphash24
 
-try:
-    import tiktoken
-except ImportError:  # pragma: no cover - dependency is installed in normal runtime
-    tiktoken = None
+import tiktoken
 
 
 _TOKEN_BLOCK_SIZE = 16
@@ -303,11 +300,8 @@ def _encode_text(text: str) -> list[int]:
     if not text:
         return []
 
-    if tiktoken is not None:
-        encoder = tiktoken.get_encoding("cl100k_base")
-        return list(encoder.encode(text, disallowed_special=()))
-
-    return [ord(char) for char in text]
+    encoder = tiktoken.get_encoding("cl100k_base")
+    return list(encoder.encode(text, disallowed_special=()))
 
 
 def _as_int(value: Any) -> int | None:

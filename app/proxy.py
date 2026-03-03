@@ -29,6 +29,7 @@ _HOP_BY_HOP_HEADERS = {
 }
 
 
+
 def create_proxy_router() -> APIRouter:
     router = APIRouter()
 
@@ -63,6 +64,17 @@ def create_proxy_router() -> APIRouter:
         request_id = uuid4()
 
         body = await request.body()
+
+        max_body = settings.max_request_body_bytes
+        if max_body > 0 and len(body) > max_body:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": "request_too_large",
+                    "detail": f"Request body exceeds {max_body} bytes limit",
+                },
+            )
+
         request_payload = parse_json_bytes(body)
 
         query_string = request.url.query or ""
@@ -92,6 +104,7 @@ def create_proxy_router() -> APIRouter:
             upstream_response = await container.http_client.send(upstream_request, stream=True)
         except httpx.RequestError as exc:
             completed_at = datetime.now(timezone.utc)
+            strip_headers = settings.stripped_header_set
             raw_record = RawHTTPRecord(
                 request_id=request_id,
                 created_at=started_at,
@@ -99,7 +112,7 @@ def create_proxy_router() -> APIRouter:
                 path=request.url.path,
                 query_string=query_string,
                 upstream_url=upstream_url,
-                request_headers=_headers_to_multimap(request.headers),
+                request_headers=_headers_to_multimap(request.headers, strip_keys=strip_headers),
                 request_body=body,
                 response_status=502,
                 response_headers={},
@@ -145,6 +158,7 @@ def create_proxy_router() -> APIRouter:
         completed_at = datetime.now(timezone.utc)
         await upstream_response.aclose()
 
+        strip_headers = settings.stripped_header_set
         raw_record = RawHTTPRecord(
             request_id=request_id,
             created_at=started_at,
@@ -152,10 +166,10 @@ def create_proxy_router() -> APIRouter:
             path=request.url.path,
             query_string=query_string,
             upstream_url=upstream_url,
-            request_headers=_headers_to_multimap(request.headers),
+            request_headers=_headers_to_multimap(request.headers, strip_keys=strip_headers),
             request_body=body,
             response_status=upstream_response.status_code,
-            response_headers=_headers_to_multimap(upstream_response.headers),
+            response_headers=_headers_to_multimap(upstream_response.headers, strip_keys=strip_headers),
             response_body=response_body,
             duration_ms=_duration_ms(started_at, completed_at),
             client_ip=_extract_client_ip(request),
@@ -195,14 +209,25 @@ def _build_streaming_response(
     upstream_response: httpx.Response,
 ):
     container = request.app.state.container
+    settings = container.settings
     response_content_type = upstream_response.headers.get("content-type", "text/event-stream")
+    max_buffer = settings.max_stream_buffer_bytes
     captured_chunks = bytearray()
+    buffer_truncated = False
 
     async def _iterator():
+        nonlocal buffer_truncated
         stream_error: str | None = None
         try:
             async for chunk in upstream_response.aiter_bytes():
-                captured_chunks.extend(chunk)
+                if not buffer_truncated:
+                    if max_buffer > 0 and len(captured_chunks) + len(chunk) > max_buffer:
+                        remaining = max_buffer - len(captured_chunks)
+                        if remaining > 0:
+                            captured_chunks.extend(chunk[:remaining])
+                        buffer_truncated = True
+                    else:
+                        captured_chunks.extend(chunk)
                 yield chunk
         except Exception as exc:  # pragma: no cover - network interruption path
             stream_error = str(exc)
@@ -211,6 +236,7 @@ def _build_streaming_response(
             completed_at = datetime.now(timezone.utc)
             await upstream_response.aclose()
 
+            strip_headers = settings.stripped_header_set
             raw_record = RawHTTPRecord(
                 request_id=request_id,
                 created_at=started_at,
@@ -218,10 +244,10 @@ def _build_streaming_response(
                 path=request.url.path,
                 query_string=query_string,
                 upstream_url=upstream_url,
-                request_headers=_headers_to_multimap(request.headers),
+                request_headers=_headers_to_multimap(request.headers, strip_keys=strip_headers),
                 request_body=request_body,
                 response_status=upstream_response.status_code,
-                response_headers=_headers_to_multimap(upstream_response.headers),
+                response_headers=_headers_to_multimap(upstream_response.headers, strip_keys=strip_headers),
                 response_body=bytes(captured_chunks),
                 duration_ms=_duration_ms(started_at, completed_at),
                 client_ip=_extract_client_ip(request),
@@ -235,7 +261,7 @@ def _build_streaming_response(
                 response_body=bytes(captured_chunks),
                 response_content_type=response_content_type,
                 observed_at=completed_at,
-                anonymization_hash_salt=container.settings.anonymization_hash_salt,
+                anonymization_hash_salt=settings.anonymization_hash_salt,
             )
             await _safe_record(container.recorder, raw_record, trace_candidate)
 
@@ -253,6 +279,8 @@ def _build_forward_headers(request: Request) -> list[tuple[str, str]]:
         key = key_bytes.decode("latin-1")
         value = value_bytes.decode("latin-1")
         key_lower = key.lower()
+        if key_lower in _HOP_BY_HOP_HEADERS:
+            continue
         if key_lower in {"host", "content-length"}:
             continue
         headers.append((key, value))
@@ -277,19 +305,28 @@ def _filter_response_headers(
     return filtered
 
 
-def _headers_to_multimap(headers) -> dict[str, list[str]]:
+def _headers_to_multimap(
+    headers,
+    *,
+    strip_keys: frozenset[str] | None = None,
+) -> dict[str, list[str]]:
     output: dict[str, list[str]] = {}
 
     raw = getattr(headers, "raw", None)
     if raw is not None:
         for key_bytes, value_bytes in raw:
             key = key_bytes.decode("latin-1").lower()
+            if strip_keys and key in strip_keys:
+                continue
             value = value_bytes.decode("latin-1")
             output.setdefault(key, []).append(value)
         return output
 
     for key, value in headers.multi_items():
-        output.setdefault(key.lower(), []).append(value)
+        key_lower = key.lower()
+        if strip_keys and key_lower in strip_keys:
+            continue
+        output.setdefault(key_lower, []).append(value)
     return output
 
 

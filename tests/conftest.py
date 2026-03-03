@@ -30,7 +30,7 @@ def settings_factory(require_database: str) -> Callable[..., Settings]:
             "upstream_base_url": "https://upstream.test",
             "enable_raw_http_recording": True,
             "enable_qwen_trace_recording": True,
-            "anonymization_hash_salt": "integration-test-salt",
+            "anonymization_hash_salt": "integration-test-salt-long-enough-to-pass",
             "upstream_discount_header_name": "X-Chutes-Research-OptIn",
             "upstream_discount_header_value": "true",
         }

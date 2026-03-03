@@ -78,9 +78,9 @@ class PostgresRecorder:
                     else -1
                 )
 
-                mapped_hash_ids = []
-                for hash_value in trace.raw_hash_values:
-                    mapped_hash_ids.append(await _get_or_create_hash_mapped_id(conn, hash_value))
+                mapped_hash_ids = await _bulk_get_or_create_hash_mapped_ids(
+                    conn, trace.raw_hash_values
+                )
 
                 started_at = await _get_trace_clock_start(conn)
                 observed = trace.observed_at
@@ -141,18 +141,28 @@ async def _get_or_create_chat_id(conn: asyncpg.Connection, context_hash: str | N
     return int(row["chat_id"])
 
 
-async def _get_or_create_hash_mapped_id(conn: asyncpg.Connection, hash_value: int) -> int:
-    row = await conn.fetchrow(
+async def _bulk_get_or_create_hash_mapped_ids(
+    conn: asyncpg.Connection,
+    hash_values: list[int],
+) -> list[int]:
+    if not hash_values:
+        return []
+
+    unique_values = list(set(hash_values))
+
+    rows = await conn.fetch(
         """
         INSERT INTO anon_hash_domain_map (hash_value)
-        VALUES ($1)
+        SELECT unnest($1::bigint[])
         ON CONFLICT (hash_value)
         DO UPDATE SET hash_value = EXCLUDED.hash_value
-        RETURNING mapped_id
+        RETURNING hash_value, mapped_id
         """,
-        hash_value,
+        unique_values,
     )
-    return int(row["mapped_id"])
+
+    lookup = {int(row["hash_value"]): int(row["mapped_id"]) for row in rows}
+    return [lookup[hv] for hv in hash_values]
 
 
 async def _get_trace_clock_start(conn: asyncpg.Connection):

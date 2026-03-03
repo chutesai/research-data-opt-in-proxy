@@ -8,6 +8,8 @@ import pytest
 from app.anonymizer import build_usage_trace_candidate
 from app.siphash import siphash24
 
+_TEST_SALT = "unit-test-salt-long-enough-to-pass"
+
 
 @pytest.mark.unit
 def test_siphash_known_vector_empty_message():
@@ -36,7 +38,7 @@ def test_build_usage_trace_candidate_non_stream_response():
         response_body=response_payload,
         response_content_type="application/json",
         observed_at=datetime.now(timezone.utc),
-        anonymization_hash_salt="unit-test-salt",
+        anonymization_hash_salt=_TEST_SALT,
     )
 
     assert trace is not None
@@ -67,7 +69,7 @@ def test_build_usage_trace_candidate_stream_response_uses_sse_usage():
         response_body=stream_body,
         response_content_type="text/event-stream",
         observed_at=datetime.now(timezone.utc),
-        anonymization_hash_salt="unit-test-salt",
+        anonymization_hash_salt=_TEST_SALT,
     )
 
     assert trace is not None
@@ -100,8 +102,53 @@ def test_build_usage_trace_candidate_detects_image_type():
         response_body=b'{"choices":[{"message":{"content":"A cat."}}]}',
         response_content_type="application/json",
         observed_at=datetime.now(timezone.utc),
-        anonymization_hash_salt="unit-test-salt",
+        anonymization_hash_salt=_TEST_SALT,
     )
 
     assert trace is not None
     assert trace.trace_type == "image"
+
+
+@pytest.mark.unit
+def test_build_usage_trace_returns_none_for_no_messages():
+    trace = build_usage_trace_candidate(
+        request_id=uuid4(),
+        request_payload={"model": "test"},
+        response_body=b'{}',
+        response_content_type="application/json",
+        observed_at=datetime.now(timezone.utc),
+        anonymization_hash_salt=_TEST_SALT,
+    )
+    assert trace is None
+
+
+@pytest.mark.unit
+def test_build_usage_trace_returns_none_for_none_payload():
+    trace = build_usage_trace_candidate(
+        request_id=uuid4(),
+        request_payload=None,
+        response_body=b'{}',
+        response_content_type="application/json",
+        observed_at=datetime.now(timezone.utc),
+        anonymization_hash_salt=_TEST_SALT,
+    )
+    assert trace is None
+
+
+@pytest.mark.unit
+def test_build_usage_trace_returns_none_for_malformed_json():
+    trace = build_usage_trace_candidate(
+        request_id=uuid4(),
+        request_payload={"messages": "not-a-list"},
+        response_body=b'not json',
+        response_content_type="application/json",
+        observed_at=datetime.now(timezone.utc),
+        anonymization_hash_salt=_TEST_SALT,
+    )
+    assert trace is None
+
+
+@pytest.mark.unit
+def test_siphash_rejects_short_key():
+    with pytest.raises(ValueError, match="16 bytes"):
+        siphash24(b"short", b"msg")

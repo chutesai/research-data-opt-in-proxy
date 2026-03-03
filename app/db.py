@@ -79,3 +79,25 @@ async def create_pool(database_url: str) -> asyncpg.Pool:
 async def init_schema(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(_SCHEMA_SQL)
+
+
+async def cleanup_old_records(pool: asyncpg.Pool, retention_days: int) -> dict[str, int]:
+    """Delete records older than *retention_days*.
+
+    Returns a dict mapping table name to number of rows deleted.
+    """
+    if retention_days <= 0:
+        return {}
+
+    results: dict[str, int] = {}
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for table, col in [
+                ("raw_http_records", "created_at"),
+                ("anon_usage_traces", "created_at"),
+            ]:
+                tag = await conn.execute(
+                    f"DELETE FROM {table} WHERE {col} < NOW() - INTERVAL '{int(retention_days)} days'"
+                )
+                results[table] = int(tag.split()[-1])
+    return results
