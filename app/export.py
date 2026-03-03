@@ -5,13 +5,20 @@ uses JSONL with these fields per line:
     chat_id, parent_chat_id, timestamp, input_length, output_length, type, turn, hash_ids
 
 Our ``anon_usage_traces`` table stores exactly these fields (plus internal
-metadata). This module provides a query and formatter to export them.
+metadata). This module provides a query, formatter, and authenticated HTTP
+endpoint to export them.
+
+Access is restricted to API keys listed in ``EXPORT_API_KEY_WHITELIST``.
 """
 
 from __future__ import annotations
 
-import orjson
+from datetime import datetime, timezone
+
 import asyncpg
+import orjson
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 
 EXPORT_QUERY = """\
@@ -59,17 +66,89 @@ def row_to_jsonl(row: asyncpg.Record) -> bytes:
     return orjson.dumps(record)
 
 
+def _extract_bearer_token(request: Request) -> str | None:
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return None
+
+
+def create_export_router() -> APIRouter:
+    router = APIRouter(prefix="/internal", tags=["export"])
+
+    @router.get("/export/traces.jsonl")
+    async def export_traces(
+        request: Request,
+        start: str | None = None,
+        end: str | None = None,
+    ):
+        container = request.app.state.container
+        settings = container.settings
+
+        # --- auth gate ---
+        allowed_keys = settings.export_api_keys
+        if not allowed_keys:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "not_found", "detail": "Export endpoint is disabled"},
+            )
+
+        token = _extract_bearer_token(request)
+        if not token or token not in allowed_keys:
+            return JSONResponse(
+                status_code=403,
+                content={"error": "forbidden", "detail": "Invalid or missing API key"},
+            )
+
+        # --- resolve pool ---
+        recorder = container.recorder
+        pool = getattr(recorder, "pool", None)
+        if pool is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "unavailable", "detail": "Database recording is not enabled"},
+            )
+
+        # --- parse optional date range ---
+        start_time = _parse_iso(start) if start else None
+        end_time = _parse_iso(end) if end else None
+
+        async def _stream():
+            async with pool.acquire() as conn:
+                if start_time and end_time:
+                    rows = await conn.fetch(EXPORT_QUERY_WITH_DATE_RANGE, start_time, end_time)
+                else:
+                    rows = await conn.fetch(EXPORT_QUERY)
+                for row in rows:
+                    yield row_to_jsonl(row) + b"\n"
+
+        return StreamingResponse(
+            _stream(),
+            media_type="application/x-ndjson",
+            headers={
+                "Content-Disposition": "attachment; filename=traces.jsonl",
+            },
+        )
+
+    return router
+
+
+def _parse_iso(value: str) -> datetime:
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+# --- standalone helpers (for CLI / cron use) ---
+
 async def export_traces_jsonl(
     pool: asyncpg.Pool,
     *,
     start_time=None,
     end_time=None,
 ) -> list[bytes]:
-    """Export all anonymized traces as Qwen-Bailian JSONL lines.
-
-    Returns a list of bytes, each a valid JSON line.
-    For large datasets, consider streaming directly to a file instead.
-    """
+    """Export all anonymized traces as Qwen-Bailian JSONL lines."""
     async with pool.acquire() as conn:
         if start_time and end_time:
             rows = await conn.fetch(EXPORT_QUERY_WITH_DATE_RANGE, start_time, end_time)

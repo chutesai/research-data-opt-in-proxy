@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import Settings, get_settings
 from app.db import create_pool, init_schema
+from app.export import create_export_router
 from app.proxy import create_proxy_router
 from app.rate_limit import RateLimitMiddleware
 from app.recorder import NoopRecorder, PostgresRecorder
@@ -100,6 +101,7 @@ def create_app(
             window_seconds=resolved_settings.rate_limit_window_seconds,
         )
 
+    app.include_router(create_export_router())
     app.include_router(create_proxy_router())
     return app
 
