@@ -25,7 +25,7 @@ The service:
 - Forwards method/path/query/body/headers to `UPSTREAM_BASE_URL`.
 - Strips hop-by-hop headers (connection, transfer-encoding, etc.) from both request and response forwarding.
 - Injects proxy-managed Chutes headers:
-1. `X-Chutes-Research-OptIn: true` (discount routing signal)
+1. `X-Chutes-Research-OptIn: <secret token>` (discount routing signal)
 2. `X-Chutes-Trace: true` (enable upstream trace envelopes)
 3. `X-Chutes-Correlation-Id: <uuid>` (request correlation)
 - Removes caller-supplied versions of managed headers before forwarding, then sets canonical values.

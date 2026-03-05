@@ -74,7 +74,7 @@ A configurable max request body size (default 10 MiB) rejects oversized payloads
 ### 5. Per-IP rate limiting
 **File:** `app/rate_limit.py`, `app/main.py`, `app/config.py`
 
-New in-memory sliding-window rate limiter middleware. Configurable per-client-IP request limit with a configurable time window. The `/healthz` endpoint is exempt. Disabled by default (`0` = no limit).
+New in-memory sliding-window rate limiter middleware. Configurable per-client-IP request limit with a configurable time window. Both `/healthz` and `/health` are exempt. Disabled by default (`0` = no limit).
 
 **Config:** `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW_SECONDS`
 
@@ -125,7 +125,7 @@ Export support is now manual only (no exposed endpoint). The exporter writes ful
 
 ## Test Coverage
 
-### 13. Comprehensive new tests (29 total, up from 8)
+### 13. Comprehensive new tests (41 total, up from 8)
 **New test files:**
 - `tests/unit/test_config.py` — salt validation, stripped header parsing, defaults
 - `tests/unit/test_proxy_headers.py` — hop-by-hop filtering, header stripping
