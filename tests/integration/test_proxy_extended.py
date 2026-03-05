@@ -215,3 +215,27 @@ async def test_auth_and_discount_headers_stripped_from_recording(
     assert "content-type" in headers_dict
     assert raw["correlation_id"] is not None
     UUID(str(raw["correlation_id"]))
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_internal_export_path_blocked():
+    settings = Settings(
+        enable_raw_http_recording=False,
+        enable_qwen_trace_recording=False,
+        anonymization_hash_salt="blocked-export-test-salt-long-enough",
+        upstream_base_url="https://upstream.test",
+    )
+
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, json={"unexpected": True}))
+    app = create_app(settings, upstream_transport=transport)
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get("/internal/export/traces.jsonl")
+
+    assert resp.status_code == 404
+    assert resp.json()["error"] == "not_found"

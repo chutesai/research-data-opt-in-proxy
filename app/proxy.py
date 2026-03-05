@@ -33,6 +33,8 @@ _HOP_BY_HOP_HEADERS = {
     "content-encoding",
 }
 
+_BLOCKED_PROXY_PATH_PREFIXES = ("/internal/export",)
+
 
 
 def create_proxy_router() -> APIRouter:
@@ -65,6 +67,12 @@ def create_proxy_router() -> APIRouter:
     async def proxy_request(request: Request, full_path: str = ""):
         container = request.app.state.container
         settings = container.settings
+
+        if request.url.path.startswith(_BLOCKED_PROXY_PATH_PREFIXES):
+            return JSONResponse(
+                status_code=404,
+                content={"error": "not_found", "detail": "Not found"},
+            )
 
         started_at = datetime.now(timezone.utc)
         request_id = uuid4()
