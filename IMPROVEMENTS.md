@@ -82,7 +82,9 @@ Previously, hop-by-hop headers (`connection`, `transfer-encoding`, `upgrade`, `p
 
 Authorization headers, API keys, cookies, and the secret discount header are now **completely removed** from the stored raw HTTP recordings — not just redacted. This means no auth tokens, bearer keys, or session cookies are ever persisted to the database. The discount header (`X-Chutes-Research-OptIn`) is automatically added to the strip list when configured.
 
-**Config:** `STRIPPED_HEADER_NAMES` (default: `authorization,x-api-key,cookie,set-cookie`)
+Sensitive infrastructure headers are also stripped by default (`forwarded`, `x-vercel-oidc-token`, `x-vercel-proxy-signature`, `x-vercel-proxy-signature-ts`, `x-vercel-internal-intra-session`) to avoid leaking platform internals in exports.
+
+**Config:** `STRIPPED_HEADER_NAMES`
 
 ### 3. ANONYMIZATION_HASH_SALT now enforced as required
 **File:** `app/config.py`

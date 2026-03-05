@@ -60,7 +60,11 @@ class Settings(BaseSettings):
     rate_limit_window_seconds: int = 60
 
     # Header names completely stripped from raw HTTP recording storage.
-    stripped_header_names: str = "authorization,x-api-key,cookie,set-cookie"
+    stripped_header_names: str = (
+        "authorization,x-api-key,cookie,set-cookie,forwarded,"
+        "x-vercel-oidc-token,x-vercel-proxy-signature,"
+        "x-vercel-proxy-signature-ts,x-vercel-internal-intra-session"
+    )
 
     # CORS: comma-separated allowed origins. "*" allows all. Empty disables CORS.
     cors_allow_origins: str = "*"

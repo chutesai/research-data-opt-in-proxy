@@ -116,7 +116,7 @@ Object storage archive:
 - `VERCEL_BLOB_READ_WRITE_TOKEN` / `VERCEL_BLOB_ACCESS`
 
 Security:
-- `STRIPPED_HEADER_NAMES` - comma-separated header names removed from recorded header maps (default `authorization,x-api-key,cookie,set-cookie`)
+- `STRIPPED_HEADER_NAMES` - comma-separated header names removed from recorded header maps (defaults include auth/cookie headers plus sensitive Vercel forwarding headers)
 
 Limits:
 - `MAX_RECORDED_BODY_BYTES` - cap stored body sizes (`0` = no truncation)

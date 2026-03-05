@@ -191,7 +191,12 @@ async def test_auth_and_discount_headers_stripped_from_recording(
         ) as client:
             resp = await client.post(
                 "/v1/chat/completions",
-                headers={"Authorization": "Bearer sk-super-secret-key"},
+                headers={
+                    "Authorization": "Bearer sk-super-secret-key",
+                    "Forwarded": "for=198.51.100.1;proto=https",
+                    "X-Vercel-Oidc-Token": "oidc-secret-token",
+                    "X-Vercel-Proxy-Signature": "proxy-signature-secret",
+                },
                 json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
             )
 
@@ -211,6 +216,9 @@ async def test_auth_and_discount_headers_stripped_from_recording(
     assert "x-chutes-research-optin" not in headers_dict
     assert "x-chutes-trace" not in headers_dict
     assert "x-chutes-correlation-id" not in headers_dict
+    assert "forwarded" not in headers_dict
+    assert "x-vercel-oidc-token" not in headers_dict
+    assert "x-vercel-proxy-signature" not in headers_dict
     # Normal headers should still be present
     assert "content-type" in headers_dict
     assert raw["correlation_id"] is not None
