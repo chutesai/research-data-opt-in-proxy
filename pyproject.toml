@@ -54,6 +54,7 @@ packages = ["app"]
 include = [
   "app",
   "api",
+  "scripts",
   "tests",
   "README.md",
   "pyproject.toml",
