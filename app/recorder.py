@@ -33,6 +33,7 @@ class PostgresRecorder:
             """
             INSERT INTO raw_http_records (
                 request_id,
+                correlation_id,
                 created_at,
                 method,
                 path,
@@ -46,12 +47,15 @@ class PostgresRecorder:
                 duration_ms,
                 client_ip,
                 is_stream,
+                upstream_invocation_id,
+                chutes_trace,
                 error
             ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10::jsonb,$11,$12,$13,$14,$15
+                $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$17::jsonb,$18
             )
             """,
             record.request_id,
+            record.correlation_id,
             record.created_at,
             record.method,
             record.path,
@@ -65,6 +69,8 @@ class PostgresRecorder:
             record.duration_ms,
             record.client_ip,
             record.is_stream,
+            record.upstream_invocation_id,
+            orjson.dumps(record.chutes_trace).decode("utf-8"),
             record.error,
         )
 
@@ -91,6 +97,24 @@ class PostgresRecorder:
                 metadata = {}
                 if trace.model:
                     metadata["model"] = trace.model
+                if trace.correlation_id:
+                    metadata["correlation_id"] = str(trace.correlation_id)
+                if trace.upstream_invocation_id:
+                    metadata["upstream_invocation_id"] = trace.upstream_invocation_id
+                if trace.trace_invocation_id:
+                    metadata["trace_invocation_id"] = trace.trace_invocation_id
+                if trace.target_instance_id:
+                    metadata["target_instance_id"] = trace.target_instance_id
+                if trace.target_uid is not None:
+                    metadata["target_uid"] = trace.target_uid
+                if trace.target_hotkey:
+                    metadata["target_hotkey"] = trace.target_hotkey
+                if trace.target_coldkey:
+                    metadata["target_coldkey"] = trace.target_coldkey
+                if trace.target_child_id:
+                    metadata["target_child_id"] = trace.target_child_id
+                if trace.trace_event_count is not None:
+                    metadata["trace_event_count"] = trace.trace_event_count
 
                 await conn.execute(
                     """

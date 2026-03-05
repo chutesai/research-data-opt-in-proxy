@@ -6,6 +6,7 @@ import asyncpg
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS raw_http_records (
     request_id UUID PRIMARY KEY,
+    correlation_id UUID,
     created_at TIMESTAMPTZ NOT NULL,
     method TEXT NOT NULL,
     path TEXT NOT NULL,
@@ -19,11 +20,22 @@ CREATE TABLE IF NOT EXISTS raw_http_records (
     duration_ms INTEGER NOT NULL,
     client_ip TEXT,
     is_stream BOOLEAN NOT NULL,
+    upstream_invocation_id TEXT,
+    chutes_trace JSONB NOT NULL DEFAULT '{}'::jsonb,
     error TEXT
 );
 
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS correlation_id UUID;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS upstream_invocation_id TEXT;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS chutes_trace JSONB NOT NULL DEFAULT '{}'::jsonb;
+
 CREATE INDEX IF NOT EXISTS raw_http_records_created_at_idx ON raw_http_records (created_at DESC);
 CREATE INDEX IF NOT EXISTS raw_http_records_path_idx ON raw_http_records (path);
+CREATE INDEX IF NOT EXISTS raw_http_records_correlation_id_idx ON raw_http_records (correlation_id);
+CREATE INDEX IF NOT EXISTS raw_http_records_upstream_invocation_id_idx ON raw_http_records (upstream_invocation_id);
 
 CREATE TABLE IF NOT EXISTS anon_trace_sessions (
     chat_id BIGSERIAL PRIMARY KEY,

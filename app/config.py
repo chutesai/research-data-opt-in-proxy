@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     upstream_base_url: AnyHttpUrl = "https://llm.chutes.ai"
     upstream_discount_header_name: str | None = None
     upstream_discount_header_value: str | None = None
+    upstream_trace_header_name: str = "X-Chutes-Trace"
+    upstream_trace_header_value: str = "true"
+    upstream_correlation_id_header_name: str = "X-Chutes-Correlation-Id"
 
     database_url: str = Field(default="", min_length=0)
 
@@ -95,10 +98,19 @@ class Settings(BaseSettings):
             for h in self.stripped_header_names.split(",")
             if h.strip()
         )
-        # Also strip the discount header if configured (it's a secret).
+        return base | self.managed_upstream_header_set
+
+    @property
+    def managed_upstream_header_set(self) -> frozenset[str]:
+        """Headers that are controlled by this proxy and never trusted from callers."""
+        managed = set()
         if self.upstream_discount_header_name:
-            base = base | {self.upstream_discount_header_name.lower()}
-        return base
+            managed.add(self.upstream_discount_header_name.lower())
+        if self.upstream_trace_header_name:
+            managed.add(self.upstream_trace_header_name.lower())
+        if self.upstream_correlation_id_header_name:
+            managed.add(self.upstream_correlation_id_header_name.lower())
+        return frozenset(managed)
 
 
 @lru_cache(maxsize=1)

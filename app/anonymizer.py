@@ -34,6 +34,8 @@ def build_usage_trace_candidate(
     response_content_type: str,
     observed_at: datetime,
     anonymization_hash_salt: str,
+    correlation_id: UUID | None = None,
+    trace_metadata: dict[str, Any] | None = None,
 ) -> UsageTraceCandidate | None:
     if not request_payload:
         return None
@@ -68,6 +70,8 @@ def build_usage_trace_candidate(
         anonymization_hash_salt=anonymization_hash_salt,
     )
 
+    trace_metadata = trace_metadata or {}
+
     return UsageTraceCandidate(
         request_id=request_id,
         observed_at=observed_at,
@@ -79,6 +83,15 @@ def build_usage_trace_candidate(
         turn=turn,
         raw_hash_values=raw_hash_values,
         model=(request_payload.get("model") or response_model),
+        correlation_id=correlation_id,
+        upstream_invocation_id=_as_str(trace_metadata.get("upstream_invocation_id")),
+        trace_invocation_id=_as_str(trace_metadata.get("trace_invocation_id")),
+        target_instance_id=_as_str(trace_metadata.get("target_instance_id")),
+        target_uid=_as_int(trace_metadata.get("target_uid")),
+        target_hotkey=_as_str(trace_metadata.get("target_hotkey")),
+        target_coldkey=_as_str(trace_metadata.get("target_coldkey")),
+        target_child_id=_as_str(trace_metadata.get("target_child_id")),
+        trace_event_count=_as_int(trace_metadata.get("trace_event_count")),
     )
 
 
@@ -170,7 +183,7 @@ def _extract_response_usage(
     response_content_type: str,
 ) -> tuple[str, int | None, int | None, str | None]:
     content_type = response_content_type.lower()
-    if "text/event-stream" in content_type:
+    if "text/event-stream" in content_type or response_body.lstrip().startswith(b"data:"):
         return _extract_sse_usage(response_body)
     return _extract_json_usage(response_body)
 
@@ -216,20 +229,7 @@ def _extract_sse_usage(response_body: bytes) -> tuple[str, int | None, int | Non
     completion_tokens: int | None = None
     model: str | None = None
 
-    for line in text.splitlines():
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if not data or data == "[DONE]":
-            continue
-
-        try:
-            payload = orjson.loads(data)
-        except orjson.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-
+    for payload in _iter_sse_payload_dicts(text):
         if isinstance(payload.get("model"), str):
             model = payload["model"]
 
@@ -260,6 +260,45 @@ def _extract_sse_usage(response_body: bytes) -> tuple[str, int | None, int | Non
                 output_parts.append(choice["text"])
 
     return "".join(output_parts), prompt_tokens, completion_tokens, model
+
+
+def _iter_sse_payload_dicts(decoded_sse: str):
+    for line in decoded_sse.splitlines():
+        payload = _parse_sse_data_line(line)
+        if payload is None:
+            continue
+
+        if "trace" in payload:
+            continue
+
+        if "result" in payload:
+            result = payload.get("result")
+            if isinstance(result, str):
+                for inner_line in result.splitlines():
+                    inner_payload = _parse_sse_data_line(inner_line)
+                    if isinstance(inner_payload, dict):
+                        yield inner_payload
+                continue
+            if isinstance(result, dict):
+                yield result
+                continue
+
+        yield payload
+
+
+def _parse_sse_data_line(line: str) -> dict[str, Any] | None:
+    if not line.startswith("data:"):
+        return None
+    data = line[5:].strip()
+    if not data or data == "[DONE]":
+        return None
+    try:
+        payload = orjson.loads(data)
+    except orjson.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
 
 
 def _context_hash(messages: list[Any]) -> str:
@@ -311,4 +350,10 @@ def _as_int(value: Any) -> int | None:
         return value
     if isinstance(value, str) and value.isdigit():
         return int(value)
+    return None
+
+
+def _as_str(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
     return None

@@ -79,6 +79,35 @@ def test_build_usage_trace_candidate_stream_response_uses_sse_usage():
 
 
 @pytest.mark.unit
+def test_build_usage_trace_candidate_stream_response_uses_wrapped_sse_usage():
+    request_payload = {
+        "model": "Qwen/Qwen2.5-7B-Instruct",
+        "messages": [{"role": "user", "content": "List numbers"}],
+        "stream": True,
+    }
+    stream_body = (
+        b'data: {"trace":{"invocation_id":"inv-1","message":"identified target"}}\n\n'
+        b'data: {"result":"data: {\\"choices\\":[{\\"delta\\":{\\"content\\":\\"1\\"}}]}\\n"}\n\n'
+        b'data: {"result":"data: {\\"choices\\":[{\\"delta\\":{\\"content\\":\\",2\\"}}],\\"usage\\":{\\"prompt_tokens\\":6,\\"completion_tokens\\":2}}\\n"}\n\n'
+        b'data: {"result":"data: [DONE]\\n"}\n\n'
+    )
+
+    trace = build_usage_trace_candidate(
+        request_id=uuid4(),
+        request_payload=request_payload,
+        response_body=stream_body,
+        response_content_type="text/event-stream",
+        observed_at=datetime.now(timezone.utc),
+        anonymization_hash_salt=_TEST_SALT,
+    )
+
+    assert trace is not None
+    assert trace.input_length == 6
+    assert trace.output_length == 2
+    assert trace.turn == 1
+
+
+@pytest.mark.unit
 def test_build_usage_trace_candidate_detects_image_type():
     request_payload = {
         "model": "vision-model",

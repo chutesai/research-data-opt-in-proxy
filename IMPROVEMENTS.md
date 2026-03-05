@@ -2,6 +2,34 @@
 
 Summary of all security, performance, and correctness improvements made to the research-data-opt-in-proxy.
 
+## v0.3.0 Additions
+
+### Chutes trace activation + parsing
+- The proxy now always forwards `X-Chutes-Trace: true` and parses trace envelopes to extract:
+  - invocation IDs
+  - selected target instance ID
+  - miner uid/hotkey/coldkey
+  - trace attempt/error events
+
+### Correlation ID header
+- The proxy now injects `X-Chutes-Correlation-Id: <uuid>` per request.
+- Caller-supplied managed headers are stripped before forwarding to prevent spoofing.
+- Correlation ID is also returned in proxy responses.
+
+### DB schema + recording enhancements
+- `raw_http_records` now stores:
+  - `correlation_id`
+  - `upstream_invocation_id`
+  - `chutes_trace` JSON metadata
+- `anon_usage_traces.metadata` now stores correlation and selected trace identifiers when anonymized recording is enabled.
+
+### OpenAI compatibility hardening
+- Streaming responses are unwrapped so `trace` envelope events are not leaked to downstream clients.
+- Non-stream trace envelopes are unwrapped to plain JSON responses.
+
+### Production config decision
+- `ENABLE_QWEN_TRACE_RECORDING` default switched to `false` in deployment env to collect full-text traces only.
+
 ## Security Fixes
 
 ### 1. Hop-by-hop headers now filtered from client requests

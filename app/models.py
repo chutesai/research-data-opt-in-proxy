@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
@@ -8,6 +9,7 @@ from uuid import UUID
 @dataclass(slots=True)
 class RawHTTPRecord:
     request_id: UUID
+    correlation_id: UUID
     created_at: datetime
     method: str
     path: str
@@ -21,6 +23,8 @@ class RawHTTPRecord:
     duration_ms: int
     client_ip: str | None
     is_stream: bool
+    upstream_invocation_id: str | None
+    chutes_trace: dict[str, Any]
     error: str | None = None
 
 
@@ -36,3 +40,12 @@ class UsageTraceCandidate:
     turn: int
     raw_hash_values: list[int]
     model: str | None = None
+    correlation_id: UUID | None = None
+    upstream_invocation_id: str | None = None
+    trace_invocation_id: str | None = None
+    target_instance_id: str | None = None
+    target_uid: int | None = None
+    target_hotkey: str | None = None
+    target_coldkey: str | None = None
+    target_child_id: str | None = None
+    trace_event_count: int | None = None

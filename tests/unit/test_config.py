@@ -60,6 +60,23 @@ def test_stripped_header_set_includes_discount_header():
         upstream_discount_header_name="X-Chutes-Research-OptIn",
     )
     assert "x-chutes-research-optin" in s.stripped_header_set
+    assert "x-chutes-trace" in s.stripped_header_set
+    assert "x-chutes-correlation-id" in s.stripped_header_set
+
+
+@pytest.mark.unit
+def test_managed_upstream_header_set_contains_proxy_headers():
+    s = Settings(
+        anonymization_hash_salt="a-real-secret-value-for-testing",
+        upstream_discount_header_name="X-Chutes-Research-OptIn",
+    )
+    assert s.managed_upstream_header_set == frozenset(
+        {
+            "x-chutes-research-optin",
+            "x-chutes-trace",
+            "x-chutes-correlation-id",
+        }
+    )
 
 
 @pytest.mark.unit

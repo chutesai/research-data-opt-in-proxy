@@ -23,8 +23,13 @@ The service:
 - Accepts incoming API calls (for example `/v1/chat/completions`, `/v1/models`).
 - Forwards method/path/query/body/headers to `UPSTREAM_BASE_URL`.
 - Strips hop-by-hop headers (connection, transfer-encoding, etc.) from both request and response forwarding.
-- Injects the optional discount header if configured.
-- Returns upstream response as-is (including SSE streaming for `stream=true`).
+- Injects proxy-managed Chutes headers:
+1. `X-Chutes-Research-OptIn: true` (discount routing signal)
+2. `X-Chutes-Trace: true` (enable upstream trace envelopes)
+3. `X-Chutes-Correlation-Id: <uuid>` (request correlation)
+- Removes caller-supplied versions of managed headers before forwarding, then sets canonical values.
+- Returns upstream responses while preserving OpenAI-compatible semantics (including SSE streaming for `stream=true`).
+- Unwraps Chutes trace envelopes so downstream clients still receive OpenAI-compatible payloads.
 - Stores recording data in Postgres when enabled.
 - Redacts sensitive headers (Authorization, API keys, cookies) in stored recordings.
 - Enforces configurable request body size limits.
@@ -39,6 +44,7 @@ Stores:
 - Request metadata: method, path, query, client IP, timestamp, duration.
 - Request headers (with sensitive values redacted) and request body.
 - Response status, response headers, full response body.
+- Correlation and trace metadata: correlation ID, invocation IDs, selected target instance/uid/hotkey/coldkey, and parsed trace events.
 - Stream flag and optional transport error field.
 
 Sensitive headers (`authorization`, `x-api-key`, `cookie`, `set-cookie` by default) are replaced with `[REDACTED]` before storage. Configure via `SANITIZED_HEADER_NAMES`.
@@ -65,6 +71,7 @@ Implementation details:
 3. Applying salted SipHash-2-4 (key derived via Blake2b from the salt).
 4. Domain-remapping hash outputs to sequential integer IDs via bulk upsert.
 - Salt comes from `ANONYMIZATION_HASH_SALT` (required, must be a real secret).
+- Trace metadata is also attached in `metadata` (correlation ID, invocation IDs, selected target identifiers).
 
 Tables:
 - `anon_usage_traces`
@@ -82,8 +89,11 @@ Main:
 - `UPSTREAM_BASE_URL` (default `https://llm.chutes.ai`)
 - `UPSTREAM_DISCOUNT_HEADER_NAME` (optional)
 - `UPSTREAM_DISCOUNT_HEADER_VALUE` (optional)
+- `UPSTREAM_TRACE_HEADER_NAME` (default `X-Chutes-Trace`)
+- `UPSTREAM_TRACE_HEADER_VALUE` (default `true`)
+- `UPSTREAM_CORRELATION_ID_HEADER_NAME` (default `X-Chutes-Correlation-Id`)
 - `ENABLE_RAW_HTTP_RECORDING` (default `true`)
-- `ENABLE_QWEN_TRACE_RECORDING` (default `true`)
+- `ENABLE_QWEN_TRACE_RECORDING` (default `false`, keep disabled when collecting full-text traces only)
 
 Security:
 - `SANITIZED_HEADER_NAMES` - comma-separated header names to redact (default `authorization,x-api-key,cookie,set-cookie`)
@@ -188,6 +198,7 @@ Then set environment variables in Vercel project settings (or with CLI) before f
 - Do not commit secrets (`DATABASE_URL`, salts, API keys). The `.gitignore` already excludes `.env.*` files.
 - `ANONYMIZATION_HASH_SALT` must be a real secret. The app will refuse to start with placeholder values.
 - Authorization headers and API keys are automatically redacted in raw HTTP recordings before storage.
+- Internal managed headers (`X-Chutes-Research-OptIn`, `X-Chutes-Trace`, `X-Chutes-Correlation-Id`) are stripped from stored header maps.
 - Hop-by-hop headers (connection, transfer-encoding, upgrade, etc.) are stripped from both forwarded requests and responses.
 - Configure `RATE_LIMIT_REQUESTS` in production to prevent abuse.
 - Set `RETENTION_DAYS` and run periodic cleanup to manage storage growth.

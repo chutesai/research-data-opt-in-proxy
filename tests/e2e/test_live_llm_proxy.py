@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+from uuid import UUID
 
 import httpx
 import pytest
@@ -13,6 +15,7 @@ from app.main import create_app
 async def test_live_llm_proxy_end_to_end(
     settings_factory,
     db_truncate,
+    db_fetch_one,
     db_fetch_value,
 ):
     api_key = os.getenv("CHUTES_API_KEY")
@@ -58,6 +61,7 @@ async def test_live_llm_proxy_end_to_end(
                 pytest.skip("Live upstream inference timed out during e2e run")
 
     assert chat_resp.status_code == 200, chat_resp.text
+    assert UUID(chat_resp.headers["x-chutes-correlation-id"])
     chat_payload = chat_resp.json()
     assert isinstance(chat_payload.get("choices"), list)
 
@@ -68,6 +72,16 @@ async def test_live_llm_proxy_end_to_end(
     assert raw_count >= 2
     # Only chat-completions carries messages; /v1/models should not generate trace.
     assert trace_count >= 1
+
+    raw_row = await db_fetch_one(
+        "SELECT correlation_id, chutes_trace FROM raw_http_records WHERE path = '/v1/chat/completions' ORDER BY created_at DESC LIMIT 1"
+    )
+    assert raw_row is not None
+    assert raw_row["correlation_id"] is not None
+    chutes_trace = raw_row["chutes_trace"]
+    if isinstance(chutes_trace, str):
+        chutes_trace = json.loads(chutes_trace)
+    assert chutes_trace.get("upstream_invocation_id")
 
 
 def _choose_model_for_smoke_test(model_list: list[dict]) -> str:

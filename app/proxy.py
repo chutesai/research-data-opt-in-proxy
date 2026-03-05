@@ -9,6 +9,11 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app.anonymizer import build_usage_trace_candidate, parse_json_bytes
+from app.chutes_trace import (
+    TraceSSEUnwrapper,
+    extract_chutes_trace_metadata,
+    unwrap_chutes_non_stream_body,
+)
 from app.models import RawHTTPRecord
 
 
@@ -62,6 +67,7 @@ def create_proxy_router() -> APIRouter:
 
         started_at = datetime.now(timezone.utc)
         request_id = uuid4()
+        correlation_id = uuid4()
 
         body = await request.body()
 
@@ -81,7 +87,27 @@ def create_proxy_router() -> APIRouter:
         path_segment = full_path.lstrip("/")
         upstream_url = f"{settings.normalized_upstream_base_url}/{path_segment}"
 
-        forward_headers = _build_forward_headers(request=request)
+        forward_headers = _build_forward_headers(
+            request=request,
+            managed_headers=settings.managed_upstream_header_set,
+        )
+        if (
+            settings.upstream_trace_header_name
+            and settings.upstream_trace_header_value is not None
+        ):
+            forward_headers.append(
+                (
+                    settings.upstream_trace_header_name,
+                    settings.upstream_trace_header_value,
+                )
+            )
+        if settings.upstream_correlation_id_header_name:
+            forward_headers.append(
+                (
+                    settings.upstream_correlation_id_header_name,
+                    str(correlation_id),
+                )
+            )
         if (
             settings.upstream_discount_header_name
             and settings.upstream_discount_header_value is not None
@@ -107,6 +133,7 @@ def create_proxy_router() -> APIRouter:
             strip_headers = settings.stripped_header_set
             raw_record = RawHTTPRecord(
                 request_id=request_id,
+                correlation_id=correlation_id,
                 created_at=started_at,
                 method=request.method,
                 path=request.url.path,
@@ -120,6 +147,8 @@ def create_proxy_router() -> APIRouter:
                 duration_ms=_duration_ms(started_at, completed_at),
                 client_ip=_extract_client_ip(request),
                 is_stream=False,
+                upstream_invocation_id=None,
+                chutes_trace={},
                 error=str(exc),
             )
             trace_candidate = build_usage_trace_candidate(
@@ -129,18 +158,26 @@ def create_proxy_router() -> APIRouter:
                 response_content_type="application/json",
                 observed_at=completed_at,
                 anonymization_hash_salt=settings.anonymization_hash_salt,
+                correlation_id=correlation_id,
+                trace_metadata={},
             )
             await _safe_record(container.recorder, raw_record, trace_candidate)
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=502,
                 content={
                     "error": "upstream_request_failed",
                     "detail": str(exc),
                 },
             )
+            if settings.upstream_correlation_id_header_name:
+                response.headers[settings.upstream_correlation_id_header_name] = str(correlation_id)
+            return response
 
         response_content_type = upstream_response.headers.get("content-type", "")
-        is_stream = "text/event-stream" in response_content_type.lower()
+        stream_requested = bool(
+            isinstance(request_payload, dict) and request_payload.get("stream") is True
+        )
+        is_stream = "text/event-stream" in response_content_type.lower() and stream_requested
 
         if is_stream:
             return _build_streaming_response(
@@ -149,6 +186,7 @@ def create_proxy_router() -> APIRouter:
                 request_payload=request_payload,
                 request_body=body,
                 started_at=started_at,
+                correlation_id=correlation_id,
                 query_string=query_string,
                 upstream_url=upstream_url,
                 upstream_response=upstream_response,
@@ -157,10 +195,20 @@ def create_proxy_router() -> APIRouter:
         response_body = await upstream_response.aread()
         completed_at = datetime.now(timezone.utc)
         await upstream_response.aclose()
+        trace_metadata = extract_chutes_trace_metadata(
+            response_body,
+            response_content_type,
+            upstream_response.headers,
+        )
+        client_response_body = response_body
+        client_response_content_type = response_content_type
+        if unwrapped := unwrap_chutes_non_stream_body(response_body):
+            client_response_body, client_response_content_type = unwrapped
 
         strip_headers = settings.stripped_header_set
         raw_record = RawHTTPRecord(
             request_id=request_id,
+            correlation_id=correlation_id,
             created_at=started_at,
             method=request.method,
             path=request.url.path,
@@ -174,24 +222,35 @@ def create_proxy_router() -> APIRouter:
             duration_ms=_duration_ms(started_at, completed_at),
             client_ip=_extract_client_ip(request),
             is_stream=False,
+            upstream_invocation_id=_as_optional_str(trace_metadata.get("upstream_invocation_id")),
+            chutes_trace=trace_metadata,
             error=None,
         )
 
         trace_candidate = build_usage_trace_candidate(
             request_id=request_id,
             request_payload=request_payload,
-            response_body=response_body,
-            response_content_type=response_content_type,
+            response_body=client_response_body,
+            response_content_type=client_response_content_type,
             observed_at=completed_at,
             anonymization_hash_salt=settings.anonymization_hash_salt,
+            correlation_id=correlation_id,
+            trace_metadata=trace_metadata,
         )
         await _safe_record(container.recorder, raw_record, trace_candidate)
 
+        response_headers = _filter_response_headers(
+            upstream_response.headers,
+            drop_content_type=True,
+        )
+        if settings.upstream_correlation_id_header_name:
+            response_headers[settings.upstream_correlation_id_header_name] = str(correlation_id)
+
         return Response(
-            content=response_body,
+            content=client_response_body,
             status_code=upstream_response.status_code,
-            media_type=response_content_type or None,
-            headers=_filter_response_headers(upstream_response.headers, drop_content_type=True),
+            media_type=client_response_content_type or None,
+            headers=response_headers,
         )
 
     return router
@@ -204,6 +263,7 @@ def _build_streaming_response(
     request_payload,
     request_body: bytes,
     started_at: datetime,
+    correlation_id,
     query_string: str,
     upstream_url: str,
     upstream_response: httpx.Response,
@@ -214,6 +274,7 @@ def _build_streaming_response(
     max_buffer = settings.max_stream_buffer_bytes
     captured_chunks = bytearray()
     buffer_truncated = False
+    unwrapper = TraceSSEUnwrapper()
 
     async def _iterator():
         nonlocal buffer_truncated
@@ -228,17 +289,29 @@ def _build_streaming_response(
                         buffer_truncated = True
                     else:
                         captured_chunks.extend(chunk)
-                yield chunk
+                outgoing_chunk = unwrapper.feed(chunk)
+                if outgoing_chunk:
+                    yield outgoing_chunk
+
+            remaining = unwrapper.finalize()
+            if remaining:
+                yield remaining
         except Exception as exc:  # pragma: no cover - network interruption path
             stream_error = str(exc)
             raise
         finally:
             completed_at = datetime.now(timezone.utc)
             await upstream_response.aclose()
+            trace_metadata = extract_chutes_trace_metadata(
+                bytes(captured_chunks),
+                response_content_type,
+                upstream_response.headers,
+            )
 
             strip_headers = settings.stripped_header_set
             raw_record = RawHTTPRecord(
                 request_id=request_id,
+                correlation_id=correlation_id,
                 created_at=started_at,
                 method=request.method,
                 path=request.url.path,
@@ -252,6 +325,8 @@ def _build_streaming_response(
                 duration_ms=_duration_ms(started_at, completed_at),
                 client_ip=_extract_client_ip(request),
                 is_stream=True,
+                upstream_invocation_id=_as_optional_str(trace_metadata.get("upstream_invocation_id")),
+                chutes_trace=trace_metadata,
                 error=stream_error,
             )
 
@@ -262,18 +337,28 @@ def _build_streaming_response(
                 response_content_type=response_content_type,
                 observed_at=completed_at,
                 anonymization_hash_salt=settings.anonymization_hash_salt,
+                correlation_id=correlation_id,
+                trace_metadata=trace_metadata,
             )
             await _safe_record(container.recorder, raw_record, trace_candidate)
+
+    response_headers = _filter_response_headers(upstream_response.headers, drop_content_type=True)
+    if settings.upstream_correlation_id_header_name:
+        response_headers[settings.upstream_correlation_id_header_name] = str(correlation_id)
 
     return StreamingResponse(
         _iterator(),
         status_code=upstream_response.status_code,
         media_type=response_content_type,
-        headers=_filter_response_headers(upstream_response.headers, drop_content_type=True),
+        headers=response_headers,
     )
 
 
-def _build_forward_headers(request: Request) -> list[tuple[str, str]]:
+def _build_forward_headers(
+    request: Request,
+    *,
+    managed_headers: frozenset[str],
+) -> list[tuple[str, str]]:
     headers: list[tuple[str, str]] = []
     for key_bytes, value_bytes in request.headers.raw:
         key = key_bytes.decode("latin-1")
@@ -282,6 +367,8 @@ def _build_forward_headers(request: Request) -> list[tuple[str, str]]:
         if key_lower in _HOP_BY_HOP_HEADERS:
             continue
         if key_lower in {"host", "content-length"}:
+            continue
+        if key_lower in managed_headers:
             continue
         headers.append((key, value))
     return headers
@@ -348,3 +435,9 @@ async def _safe_record(recorder, raw_record, trace_candidate) -> None:
         await recorder.record(raw_record, trace_candidate)
     except Exception as exc:  # pragma: no cover - defensive path
         logger.exception("Failed to record usage data: %s", exc)
+
+
+def _as_optional_str(value) -> str | None:
+    if isinstance(value, str):
+        return value
+    return None

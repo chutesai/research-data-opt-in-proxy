@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 import orjson
 import pytest
+from uuid import UUID
 
 from app.config import Settings
 from app.main import create_app
@@ -197,7 +198,7 @@ async def test_auth_and_discount_headers_stripped_from_recording(
     assert resp.status_code == 200
 
     raw = await db_fetch_one(
-        "SELECT request_headers FROM raw_http_records LIMIT 1",
+        "SELECT request_headers, correlation_id FROM raw_http_records LIMIT 1",
     )
     headers_dict = raw["request_headers"]
     if isinstance(headers_dict, str):
@@ -208,5 +209,9 @@ async def test_auth_and_discount_headers_stripped_from_recording(
     assert "authorization" not in headers_dict
     # Discount header must also be absent
     assert "x-chutes-research-optin" not in headers_dict
+    assert "x-chutes-trace" not in headers_dict
+    assert "x-chutes-correlation-id" not in headers_dict
     # Normal headers should still be present
     assert "content-type" in headers_dict
+    assert raw["correlation_id"] is not None
+    UUID(str(raw["correlation_id"]))
