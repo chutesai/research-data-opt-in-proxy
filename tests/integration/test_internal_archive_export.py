@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from uuid import UUID
 
 import httpx
 import pytest
@@ -82,6 +83,8 @@ async def test_archive_and_export_internal_endpoints(
                 json={"model": "m", "messages": [{"role": "user", "content": "hello"}]},
             )
             assert proxied.status_code == 200
+            response_correlation_id = proxied.headers["x-chutes-correlation-id"]
+            assert UUID(response_correlation_id)
 
             unauthorized_archive = await client.post("/internal/archive/run")
             assert unauthorized_archive.status_code == 401
@@ -98,6 +101,7 @@ async def test_archive_and_export_internal_endpoints(
             row = await db_fetch_one(
                 """
                 SELECT
+                    correlation_id,
                     octet_length(request_body) AS req_len,
                     octet_length(response_body) AS resp_len,
                     request_blob_key,
@@ -116,6 +120,7 @@ async def test_archive_and_export_internal_endpoints(
             )
             assert row["req_len"] == 0
             assert row["resp_len"] == 0
+            assert str(row["correlation_id"]) == response_correlation_id
             assert row["request_blob_key"] is not None
             assert row["response_blob_key"] is not None
             assert row["request_blob_url"].startswith("mem://")
@@ -143,3 +148,4 @@ async def test_archive_and_export_internal_endpoints(
             assert exported["response_body_text"]
             assert exported["request_body_sha256"]
             assert exported["response_body_sha256"]
+            assert exported["correlation_id"] == response_correlation_id

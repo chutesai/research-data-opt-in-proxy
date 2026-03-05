@@ -19,12 +19,15 @@ async def test_non_stream_proxy_records_raw_and_trace(
 ):
     await db_truncate()
 
+    seen: dict[str, str] = {}
+
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers.get("X-Chutes-Research-OptIn") == "true"
         assert request.headers.get("X-Chutes-Trace") == "true"
         correlation = request.headers.get("X-Chutes-Correlation-Id")
         assert correlation is not None
         UUID(correlation)
+        seen["forwarded_correlation_id"] = correlation
         payload = {
             "id": "chatcmpl-1",
             "object": "chat.completion",
@@ -63,7 +66,9 @@ async def test_non_stream_proxy_records_raw_and_trace(
     assert resp.status_code == 200
     body = resp.json()
     assert body["choices"][0]["message"]["content"] == "hello"
-    assert UUID(resp.headers["x-chutes-correlation-id"])
+    response_correlation_id = resp.headers["x-chutes-correlation-id"]
+    assert UUID(response_correlation_id)
+    assert response_correlation_id == seen["forwarded_correlation_id"]
 
     raw_count = await db_fetch_value("SELECT COUNT(*) FROM raw_http_records")
     trace_count = await db_fetch_value("SELECT COUNT(*) FROM anon_usage_traces")
@@ -81,12 +86,14 @@ async def test_non_stream_proxy_records_raw_and_trace(
     assert trace_row["type"] == "text"
     assert metadata["upstream_invocation_id"] == "parent-invocation-123"
     assert UUID(metadata["correlation_id"])
+    assert metadata["correlation_id"] == response_correlation_id
 
     raw_row = await db_fetch_one(
         "SELECT correlation_id, upstream_invocation_id FROM raw_http_records LIMIT 1",
     )
     assert raw_row["upstream_invocation_id"] == "parent-invocation-123"
     assert raw_row["correlation_id"] is not None
+    assert str(raw_row["correlation_id"]) == response_correlation_id
 
 
 @pytest.mark.integration

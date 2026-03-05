@@ -56,9 +56,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 
 def _get_client_ip(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
+    for header_name in (
+        "x-real-ip",
+        "x-vercel-forwarded-for",
+        "x-forwarded-for",
+    ):
+        header_value = request.headers.get(header_name)
+        if header_value:
+            return header_value.split(",")[0].strip()
     if request.client:
         return request.client.host
     return "unknown"

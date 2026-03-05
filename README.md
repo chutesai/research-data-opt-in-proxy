@@ -30,6 +30,11 @@ The service:
 1. `X-Chutes-Research-OptIn: <secret token>` (discount routing signal)
 2. `X-Chutes-Trace: true` (enable upstream trace envelopes)
 3. `X-Chutes-Correlation-Id: <uuid>` (request correlation)
+- Generates a fresh correlation ID per proxied request and reuses the same value for:
+1. Upstream forwarded `X-Chutes-Correlation-Id`.
+2. Downstream response `X-Chutes-Correlation-Id`.
+3. Stored `raw_http_records.correlation_id`.
+4. Exported JSONL `correlation_id`.
 - Removes caller-supplied versions of managed headers before forwarding, then sets canonical values.
 - Returns upstream responses while preserving OpenAI-compatible semantics (including SSE streaming for `stream=true`).
 - Unwraps Chutes trace envelopes so downstream clients still receive OpenAI-compatible payloads.
@@ -119,6 +124,11 @@ Limits:
 - `MAX_STREAM_BUFFER_BYTES` - cap SSE recording buffer (default 50 MiB, `0` = unlimited)
 - `RATE_LIMIT_REQUESTS` - max requests per IP per window (`0` = disabled)
 - `RATE_LIMIT_WINDOW_SECONDS` - rate limit window (default `60`)
+
+Recommended production baseline:
+- Set `RATE_LIMIT_REQUESTS` to a non-zero value (for example `600`) with `RATE_LIMIT_WINDOW_SECONDS=60`.
+- Keep `MAX_REQUEST_BODY_BYTES` enabled to reject oversized payload attacks early.
+- Keep `ARCHIVE_ENDPOINT_SECRET` and `EXPORT_ENDPOINT_SECRET` enabled.
 
 Retention:
 - `RETENTION_DAYS` - auto-delete records older than this many days (`0` = keep forever)

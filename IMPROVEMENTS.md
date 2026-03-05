@@ -14,7 +14,11 @@ Summary of all security, performance, and correctness improvements made to the r
 ### Correlation ID header
 - The proxy now injects `X-Chutes-Correlation-Id: <uuid>` per request.
 - Caller-supplied managed headers are stripped before forwarding to prevent spoofing.
-- Correlation ID is also returned in proxy responses.
+- The same generated ID is preserved end-to-end:
+  - forwarded upstream in `X-Chutes-Correlation-Id`
+  - returned to caller in `X-Chutes-Correlation-Id`
+  - stored in `raw_http_records.correlation_id`
+  - emitted in export JSONL as `correlation_id`
 
 ### DB schema + recording enhancements
 - `raw_http_records` now stores:
@@ -32,9 +36,11 @@ Summary of all security, performance, and correctness improvements made to the r
 
 ## v0.4.0 Additions
 
-### Export endpoint removed
-- Removed HTTP export routes entirely from the running API service.
-- Export is now manual/operator-only via `scripts/export_full_text.py`.
+### Export surface reduced + protected
+- Public export routes were removed.
+- Export is available via:
+  - internal protected endpoint `/internal/export/raw-http.jsonl` (secret auth)
+  - manual operator script `scripts/export_full_text.py`
 - Export format is full-text raw HTTP records (not anonymized trace export).
 
 ### Health alias
@@ -140,7 +146,7 @@ New `cleanup_old_records()` function deletes records older than `RETENTION_DAYS`
 ### 12. Manual full-text JSONL export
 **Files:** `app/export.py`, `scripts/export_full_text.py`
 
-Export support is now manual only (no exposed endpoint). The exporter writes full-text raw HTTP records (including parsed trace metadata) to JSONL from a trusted shell environment.
+Export support is available through a protected internal endpoint and manual script. The exporter writes full-text raw HTTP records (including parsed trace metadata) to JSONL from a trusted environment.
 
 ## Test Coverage
 

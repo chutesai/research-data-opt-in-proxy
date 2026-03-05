@@ -93,3 +93,42 @@ async def test_rate_limit_disabled_when_zero():
         for _ in range(20):
             resp = await client.get("/test")
             assert resp.status_code == 200
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_rate_limit_prefers_platform_ip_headers():
+    app = _make_app(max_requests=1)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        resp = await client.get(
+            "/test",
+            headers={
+                "x-real-ip": "203.0.113.1",
+                "x-forwarded-for": "198.51.100.9",
+            },
+        )
+        assert resp.status_code == 200
+
+        # Same real IP should be rate-limited even if x-forwarded-for changes.
+        resp = await client.get(
+            "/test",
+            headers={
+                "x-real-ip": "203.0.113.1",
+                "x-forwarded-for": "198.51.100.8",
+            },
+        )
+        assert resp.status_code == 429
+
+        # Different real IP should be treated as a separate client key.
+        resp = await client.get(
+            "/test",
+            headers={
+                "x-real-ip": "203.0.113.2",
+                "x-forwarded-for": "198.51.100.9",
+            },
+        )
+        assert resp.status_code == 200
