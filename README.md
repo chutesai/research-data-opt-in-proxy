@@ -16,7 +16,9 @@ This service provides:
 - Two independently switchable recording formats:
 1. Full raw HTTP request/response logging (headers + bodies).
 2. An anonymized Qwen Bailian-style usage trace format.
-- A manual (operator-only) full-text JSONL export utility.
+- Automatic small-batch archival of full request/response bodies to object storage.
+- An internal export endpoint protected by a dedicated secret.
+- A manual full-text JSONL export utility.
 
 ## Core Behavior
 
@@ -45,6 +47,7 @@ Stores:
 - Request metadata: method, path, query, client IP, timestamp, duration.
 - Request headers (with sensitive values redacted) and request body.
 - Response status, response headers, full response body.
+- Object storage archival metadata: request/response object key+url, SHA-256 checksum, size bytes, archived timestamp.
 - Correlation and trace metadata: correlation ID, invocation IDs, selected target instance/uid/hotkey/coldkey, and parsed trace events.
 - Stream flag and optional transport error field.
 
@@ -93,8 +96,19 @@ Main:
 - `UPSTREAM_TRACE_HEADER_NAME` (default `X-Chutes-Trace`)
 - `UPSTREAM_TRACE_HEADER_VALUE` (default `true`)
 - `UPSTREAM_CORRELATION_ID_HEADER_NAME` (default `X-Chutes-Correlation-Id`)
+- `EXPORT_ENDPOINT_SECRET` (required to enable `/internal/export/raw-http.jsonl`)
+- `EXPORT_ENDPOINT_SECRET_HEADER_NAME` (default `X-Chutes-Export-Secret`)
+- `ARCHIVE_ENDPOINT_SECRET` (required to enable `/internal/archive/run`)
+- `ARCHIVE_ENDPOINT_SECRET_HEADER_NAME` (default `X-Chutes-Archive-Secret`)
 - `ENABLE_RAW_HTTP_RECORDING` (default `true`)
 - `ENABLE_QWEN_TRACE_RECORDING` (default `false`, keep disabled when collecting full-text traces only)
+
+Object storage archive:
+- `ARCHIVE_STORAGE_PROVIDER` (`auto`, `s3`, `vercel_blob`)
+- `ARCHIVE_BATCH_SIZE` (default `100`)
+- `ARCHIVE_OBJECT_PREFIX` (default `raw-http-archive`)
+- `ARCHIVE_S3_BUCKET` / `ARCHIVE_S3_REGION`
+- `VERCEL_BLOB_READ_WRITE_TOKEN` / `VERCEL_BLOB_ACCESS`
 
 Security:
 - `STRIPPED_HEADER_NAMES` - comma-separated header names removed from recorded header maps (default `authorization,x-api-key,cookie,set-cookie`)
@@ -160,12 +174,40 @@ curl http://localhost:8000/healthz
 
 ## Manual Full-Text Export
 
-No HTTP export endpoint is exposed. Use the manual script from a trusted shell:
+Trusted internal export endpoint:
+
+```bash
+curl -H "X-Chutes-Export-Secret: $EXPORT_ENDPOINT_SECRET" \
+  "http://localhost:8000/internal/export/raw-http.jsonl?limit=100"
+```
+
+Manual script from a trusted shell:
 
 ```bash
 python scripts/export_full_text.py \
   --output ./exports/raw-http-$(date +%F).jsonl
 ```
+
+To resolve already-archived request/response bodies from object storage:
+
+```bash
+python scripts/export_full_text.py \
+  --output ./exports/raw-http-full.jsonl \
+  --resolve-archived-bodies
+```
+
+## Automatic Archival
+
+Run one small archival batch manually:
+
+```bash
+curl -X POST \
+  -H "X-Chutes-Archive-Secret: $ARCHIVE_ENDPOINT_SECRET" \
+  "http://localhost:8000/internal/archive/run?limit=100"
+```
+
+Production can run this via Vercel Cron every few minutes. Archive endpoint also accepts
+`Authorization: Bearer <ARCHIVE_ENDPOINT_SECRET>` for cron-compatible auth.
 
 Optional date window:
 

@@ -33,7 +33,7 @@ _HOP_BY_HOP_HEADERS = {
     "content-encoding",
 }
 
-_BLOCKED_PROXY_PATH_PREFIXES = ("/internal/export",)
+_BLOCKED_PROXY_PATH_PREFIXES = ("/internal/export", "/internal/archive")
 
 
 

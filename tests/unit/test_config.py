@@ -93,3 +93,21 @@ def test_default_max_stream_buffer():
         anonymization_hash_salt="a-real-secret-value-for-testing",
     )
     assert s.max_stream_buffer_bytes == 50 * 1024 * 1024
+
+
+@pytest.mark.unit
+def test_archive_provider_validation_rejects_unknown():
+    with pytest.raises(Exception, match="ARCHIVE_STORAGE_PROVIDER"):
+        Settings(
+            anonymization_hash_salt="a-real-secret-value-for-testing",
+            archive_storage_provider="invalid",
+        )
+
+
+@pytest.mark.unit
+def test_archive_batch_size_must_be_positive():
+    with pytest.raises(Exception, match="ARCHIVE_BATCH_SIZE"):
+        Settings(
+            anonymization_hash_salt="a-real-secret-value-for-testing",
+            archive_batch_size=0,
+        )

@@ -45,6 +45,25 @@ Summary of all security, performance, and correctness improvements made to the r
 - Discount header value now supports high-entropy secret token usage (instead of a simple boolean).
 - Header remains stripped from all stored request/response header maps.
 
+## v0.5.0 Additions
+
+### Object storage archival pipeline
+- Added small-batch archival worker that uploads request/response bodies to object storage.
+- Added DB metadata columns for:
+  - request/response blob key+url
+  - request/response SHA-256 checksum
+  - request/response size bytes
+  - `archived_at` and `archive_error`
+- Archive worker clears in-row body payloads after successful upload.
+
+### Internal endpoints with dedicated secrets
+- Added `/internal/archive/run` endpoint with secret auth.
+- Added `/internal/export/raw-http.jsonl` endpoint with dedicated export secret auth.
+- Export can optionally resolve archived bodies back from object storage.
+
+### Automatic scheduling support
+- Added Vercel cron schedule (`*/10 * * * *`) for archive endpoint triggering.
+
 ## Security Fixes
 
 ### 1. Hop-by-hop headers now filtered from client requests

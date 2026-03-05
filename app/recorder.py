@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timezone
+import hashlib
 
 import asyncpg
 import orjson
@@ -28,6 +29,18 @@ class PostgresRecorder:
     async def _record_raw_http(self, record: RawHTTPRecord) -> None:
         request_body = _truncate_bytes(record.request_body, self.settings.max_recorded_body_bytes)
         response_body = _truncate_bytes(record.response_body, self.settings.max_recorded_body_bytes)
+        request_size = (
+            record.request_body_size_bytes
+            if record.request_body_size_bytes is not None
+            else len(request_body)
+        )
+        response_size = (
+            record.response_body_size_bytes
+            if record.response_body_size_bytes is not None
+            else len(response_body)
+        )
+        request_sha256 = record.request_body_sha256 or hashlib.sha256(request_body).hexdigest()
+        response_sha256 = record.response_body_sha256 or hashlib.sha256(response_body).hexdigest()
 
         await self.pool.execute(
             """
@@ -41,9 +54,13 @@ class PostgresRecorder:
                 upstream_url,
                 request_headers,
                 request_body,
+                request_body_size_bytes,
+                request_body_sha256,
                 response_status,
                 response_headers,
                 response_body,
+                response_body_size_bytes,
+                response_body_sha256,
                 duration_ms,
                 client_ip,
                 is_stream,
@@ -51,7 +68,7 @@ class PostgresRecorder:
                 chutes_trace,
                 error
             ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$17::jsonb,$18
+                $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,$18,$19,$20,$21::jsonb,$22
             )
             """,
             record.request_id,
@@ -63,9 +80,13 @@ class PostgresRecorder:
             record.upstream_url,
             orjson.dumps(record.request_headers).decode("utf-8"),
             request_body,
+            request_size,
+            request_sha256,
             record.response_status,
             orjson.dumps(record.response_headers).decode("utf-8"),
             response_body,
+            response_size,
+            response_sha256,
             record.duration_ms,
             record.client_ip,
             record.is_stream,

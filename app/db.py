@@ -17,6 +17,16 @@ CREATE TABLE IF NOT EXISTS raw_http_records (
     response_status INTEGER NOT NULL,
     response_headers JSONB NOT NULL,
     response_body BYTEA NOT NULL,
+    request_body_size_bytes INTEGER,
+    request_body_sha256 TEXT,
+    request_blob_key TEXT,
+    request_blob_url TEXT,
+    response_body_size_bytes INTEGER,
+    response_body_sha256 TEXT,
+    response_blob_key TEXT,
+    response_blob_url TEXT,
+    archived_at TIMESTAMPTZ,
+    archive_error TEXT,
     duration_ms INTEGER NOT NULL,
     client_ip TEXT,
     is_stream BOOLEAN NOT NULL,
@@ -31,11 +41,35 @@ ALTER TABLE raw_http_records
     ADD COLUMN IF NOT EXISTS upstream_invocation_id TEXT;
 ALTER TABLE raw_http_records
     ADD COLUMN IF NOT EXISTS chutes_trace JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS request_body_size_bytes INTEGER;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS request_body_sha256 TEXT;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS request_blob_key TEXT;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS request_blob_url TEXT;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS response_body_size_bytes INTEGER;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS response_body_sha256 TEXT;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS response_blob_key TEXT;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS response_blob_url TEXT;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS archive_error TEXT;
 
 CREATE INDEX IF NOT EXISTS raw_http_records_created_at_idx ON raw_http_records (created_at DESC);
 CREATE INDEX IF NOT EXISTS raw_http_records_path_idx ON raw_http_records (path);
 CREATE INDEX IF NOT EXISTS raw_http_records_correlation_id_idx ON raw_http_records (correlation_id);
 CREATE INDEX IF NOT EXISTS raw_http_records_upstream_invocation_id_idx ON raw_http_records (upstream_invocation_id);
+CREATE INDEX IF NOT EXISTS raw_http_records_archived_at_idx ON raw_http_records (archived_at);
+CREATE INDEX IF NOT EXISTS raw_http_records_unarchived_created_at_idx
+    ON raw_http_records (created_at ASC)
+    WHERE archived_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS anon_trace_sessions (
     chat_id BIGSERIAL PRIMARY KEY,

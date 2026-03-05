@@ -24,7 +24,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if self.max_requests <= 0:
             return await call_next(request)
 
-        if request.url.path in {"/healthz", "/health"}:
+        if request.url.path in {
+            "/healthz",
+            "/health",
+            "/internal/archive/run",
+            "/internal/export/raw-http.jsonl",
+        }:
             return await call_next(request)
 
         client_ip = _get_client_ip(request)

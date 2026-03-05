@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from app.db import create_pool
 from app.export import export_raw_http_to_file
+from app.object_storage import create_object_storage
 
 
 def _parse_iso(value: str) -> datetime:
@@ -39,6 +40,11 @@ async def _run() -> int:
         "--end",
         help="End timestamp (ISO-8601, exclusive).",
     )
+    parser.add_argument(
+        "--resolve-archived-bodies",
+        action="store_true",
+        help="Fetch bodies from object storage for already archived rows.",
+    )
     args = parser.parse_args()
 
     if not args.database_url:
@@ -48,12 +54,23 @@ async def _run() -> int:
     end_time = _parse_iso(args.end) if args.end else None
 
     pool = await create_pool(args.database_url)
+    storage = None
+    if args.resolve_archived_bodies:
+        from app.config import Settings  # local import for CLI path
+
+        env_settings = Settings(
+            database_url=args.database_url,
+            enable_qwen_trace_recording=False,
+        )
+        storage = create_object_storage(env_settings)
     try:
         count = await export_raw_http_to_file(
             pool,
             args.output,
             start_time=start_time,
             end_time=end_time,
+            object_storage=storage,
+            resolve_archived_bodies=args.resolve_archived_bodies,
         )
     finally:
         await pool.close()

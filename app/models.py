@@ -25,6 +25,10 @@ class RawHTTPRecord:
     is_stream: bool
     upstream_invocation_id: str | None
     chutes_trace: dict[str, Any]
+    request_body_size_bytes: int | None = None
+    request_body_sha256: str | None = None
+    response_body_size_bytes: int | None = None
+    response_body_sha256: str | None = None
     error: str | None = None
 
 

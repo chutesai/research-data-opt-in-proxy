@@ -72,6 +72,14 @@ async def test_rate_limit_allows_healthz():
         resp = await client.get("/health")
         assert resp.status_code == 200
 
+        # internal archive endpoint is exempt (for cron trigger)
+        resp = await client.post("/internal/archive/run")
+        assert resp.status_code in {404, 405}
+
+        # internal export endpoint is exempt
+        resp = await client.get("/internal/export/raw-http.jsonl")
+        assert resp.status_code in {404, 405}
+
 
 @pytest.mark.unit
 @pytest.mark.asyncio

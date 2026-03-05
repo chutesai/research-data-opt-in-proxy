@@ -26,6 +26,12 @@ class Settings(BaseSettings):
 
     database_url: str = Field(default="", min_length=0)
 
+    # Internal endpoint auth
+    export_endpoint_secret: str = ""
+    export_endpoint_secret_header_name: str = "X-Chutes-Export-Secret"
+    archive_endpoint_secret: str = ""
+    archive_endpoint_secret_header_name: str = "X-Chutes-Archive-Secret"
+
     enable_raw_http_recording: bool = True
     enable_qwen_trace_recording: bool = True
 
@@ -62,6 +68,15 @@ class Settings(BaseSettings):
     # Data retention: days to keep records. 0 = keep forever.
     retention_days: int = 0
 
+    # Object storage archival settings
+    archive_storage_provider: str = "auto"  # auto | s3 | vercel_blob
+    archive_batch_size: int = 100
+    archive_object_prefix: str = "raw-http-archive"
+    archive_s3_bucket: str = ""
+    archive_s3_region: str = ""
+    vercel_blob_read_write_token: str = ""
+    vercel_blob_access: str = "private"
+
     @model_validator(mode="after")
     def _salt_must_be_set_when_tracing(self) -> "Settings":
         if self.enable_qwen_trace_recording:
@@ -71,6 +86,19 @@ class Settings(BaseSettings):
                     "ANONYMIZATION_HASH_SALT must be set to a real secret value "
                     "when ENABLE_QWEN_TRACE_RECORDING is true"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_archive_settings(self) -> "Settings":
+        provider = self.archive_storage_provider.lower().strip()
+        if provider not in {"auto", "s3", "vercel_blob"}:
+            raise ValueError(
+                "ARCHIVE_STORAGE_PROVIDER must be one of: auto, s3, vercel_blob"
+            )
+        if self.archive_batch_size <= 0:
+            raise ValueError("ARCHIVE_BATCH_SIZE must be > 0")
+        if self.vercel_blob_access not in {"public", "private"}:
+            raise ValueError("VERCEL_BLOB_ACCESS must be one of: public, private")
         return self
 
     @property
@@ -98,6 +126,10 @@ class Settings(BaseSettings):
         if self.upstream_correlation_id_header_name:
             managed.add(self.upstream_correlation_id_header_name.lower())
         return frozenset(managed)
+
+    @property
+    def archive_provider(self) -> str:
+        return self.archive_storage_provider.lower().strip()
 
 
 @lru_cache(maxsize=1)

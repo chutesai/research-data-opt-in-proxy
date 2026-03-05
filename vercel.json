@@ -11,5 +11,11 @@
       "src": "/(.*)",
       "dest": "api/index.py"
     }
+  ],
+  "crons": [
+    {
+      "path": "/internal/archive/run?limit=100",
+      "schedule": "*/10 * * * *"
+    }
   ]
 }

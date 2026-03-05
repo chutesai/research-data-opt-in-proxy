@@ -10,7 +10,8 @@ from app.export import raw_row_to_jsonl
 
 
 @pytest.mark.unit
-def test_raw_row_to_jsonl_with_utf8_bodies():
+@pytest.mark.asyncio
+async def test_raw_row_to_jsonl_with_utf8_bodies():
     row = {
         "request_id": uuid4(),
         "correlation_id": uuid4(),
@@ -21,9 +22,19 @@ def test_raw_row_to_jsonl_with_utf8_bodies():
         "upstream_url": "https://llm.chutes.ai/v1/chat/completions",
         "request_headers": {"content-type": ["application/json"]},
         "request_body": b'{"messages":[{"role":"user","content":"hello"}]}',
+        "request_body_size_bytes": 47,
+        "request_body_sha256": "a" * 64,
+        "request_blob_key": None,
+        "request_blob_url": None,
         "response_status": 200,
         "response_headers": {"content-type": ["application/json"]},
         "response_body": b'{"choices":[{"message":{"content":"ok"}}]}',
+        "response_body_size_bytes": 40,
+        "response_body_sha256": "b" * 64,
+        "response_blob_key": None,
+        "response_blob_url": None,
+        "archived_at": None,
+        "archive_error": None,
         "duration_ms": 123,
         "client_ip": "1.2.3.4",
         "is_stream": False,
@@ -32,7 +43,7 @@ def test_raw_row_to_jsonl_with_utf8_bodies():
         "error": None,
     }
 
-    payload = orjson.loads(raw_row_to_jsonl(row))
+    payload = orjson.loads(await raw_row_to_jsonl(row))
     assert payload["request_body_text"].startswith("{\"messages\"")
     assert payload["request_body_base64"] is None
     assert payload["response_body_text"].startswith("{\"choices\"")
@@ -41,7 +52,8 @@ def test_raw_row_to_jsonl_with_utf8_bodies():
 
 
 @pytest.mark.unit
-def test_raw_row_to_jsonl_with_binary_body_uses_base64():
+@pytest.mark.asyncio
+async def test_raw_row_to_jsonl_with_binary_body_uses_base64():
     row = {
         "request_id": uuid4(),
         "correlation_id": uuid4(),
@@ -52,9 +64,19 @@ def test_raw_row_to_jsonl_with_binary_body_uses_base64():
         "upstream_url": "https://llm.chutes.ai/upload",
         "request_headers": {},
         "request_body": b"\xff\xfe\xfd",
+        "request_body_size_bytes": 3,
+        "request_body_sha256": "c" * 64,
+        "request_blob_key": None,
+        "request_blob_url": None,
         "response_status": 200,
         "response_headers": {},
         "response_body": b"\xff\x00",
+        "response_body_size_bytes": 2,
+        "response_body_sha256": "d" * 64,
+        "response_blob_key": None,
+        "response_blob_url": None,
+        "archived_at": None,
+        "archive_error": None,
         "duration_ms": 1,
         "client_ip": None,
         "is_stream": False,
@@ -63,7 +85,7 @@ def test_raw_row_to_jsonl_with_binary_body_uses_base64():
         "error": None,
     }
 
-    payload = orjson.loads(raw_row_to_jsonl(row))
+    payload = orjson.loads(await raw_row_to_jsonl(row))
     assert payload["request_body_text"] is None
     assert isinstance(payload["request_body_base64"], str)
     assert payload["response_body_text"] is None
