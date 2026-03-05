@@ -38,6 +38,7 @@ _HOP_BY_HOP_HEADERS = {
 def create_proxy_router() -> APIRouter:
     router = APIRouter()
 
+    @router.get("/health")
     @router.get("/healthz")
     async def healthz(request: Request):
         container = request.app.state.container

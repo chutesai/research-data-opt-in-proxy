@@ -24,6 +24,10 @@ def _make_app(max_requests: int, window_seconds: int = 60) -> FastAPI:
     async def healthz():
         return {"status": "ok"}
 
+    @app.get("/health")
+    async def health():
+        return {"status": "ok"}
+
     return app
 
 
@@ -62,6 +66,10 @@ async def test_rate_limit_allows_healthz():
 
         # healthz is always allowed
         resp = await client.get("/healthz")
+        assert resp.status_code == 200
+
+        # health alias is always allowed
+        resp = await client.get("/health")
         assert resp.status_code == 200
 
 

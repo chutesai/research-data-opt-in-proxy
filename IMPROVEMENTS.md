@@ -30,6 +30,21 @@ Summary of all security, performance, and correctness improvements made to the r
 ### Production config decision
 - `ENABLE_QWEN_TRACE_RECORDING` default switched to `false` in deployment env to collect full-text traces only.
 
+## v0.4.0 Additions
+
+### Export endpoint removed
+- Removed HTTP export routes entirely from the running API service.
+- Export is now manual/operator-only via `scripts/export_full_text.py`.
+- Export format is full-text raw HTTP records (not anonymized trace export).
+
+### Health alias
+- Added `/health` endpoint as alias to existing `/healthz`.
+- Rate-limit bypass now applies to both `/health` and `/healthz`.
+
+### Discount header secret hardening
+- Discount header value now supports high-entropy secret token usage (instead of a simple boolean).
+- Header remains stripped from all stored request/response header maps.
+
 ## Security Fixes
 
 ### 1. Hop-by-hop headers now filtered from client requests
@@ -103,10 +118,10 @@ New `cleanup_old_records()` function deletes records older than `RETENTION_DAYS`
 
 **Config:** `RETENTION_DAYS` (default: `0` = keep forever)
 
-### 12. Qwen-Bailian JSONL export
-**File:** `app/export.py`
+### 12. Manual full-text JSONL export
+**Files:** `app/export.py`, `scripts/export_full_text.py`
 
-New export module that outputs anonymized traces in the exact Qwen-Bailian JSONL format used by https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon. Each line contains: `chat_id`, `parent_chat_id`, `timestamp`, `input_length`, `output_length`, `type`, `turn`, `hash_ids` — matching the reference schema exactly. Supports optional date-range filtering.
+Export support is now manual only (no exposed endpoint). The exporter writes full-text raw HTTP records (including parsed trace metadata) to JSONL from a trusted shell environment.
 
 ## Test Coverage
 

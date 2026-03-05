@@ -1,174 +1,155 @@
-"""Export anonymized traces in Qwen-Bailian JSONL format.
+"""Manual full-text export helpers for raw HTTP trace data.
 
-The Qwen-Bailian format (https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon)
-uses JSONL with these fields per line:
-    chat_id, parent_chat_id, timestamp, input_length, output_length, type, turn, hash_ids
-
-Our ``anon_usage_traces`` table stores exactly these fields (plus internal
-metadata). This module provides a query, formatter, and authenticated HTTP
-endpoint to export them.
-
-Access is restricted to API keys listed in ``EXPORT_API_KEY_WHITELIST``.
+This module intentionally does not expose any HTTP routes. Exports are meant
+to be run manually by trusted operators from a secure environment.
 """
 
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 import asyncpg
 import orjson
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, StreamingResponse
 
 
-EXPORT_QUERY = """\
+RAW_EXPORT_QUERY = """\
 SELECT
-    t.chat_id,
-    t.parent_chat_id,
-    t.timestamp,
-    t.input_length,
-    t.output_length,
-    t.type,
-    t.turn,
-    t.hash_ids
-FROM anon_usage_traces t
-ORDER BY t.created_at ASC
+    request_id,
+    correlation_id,
+    created_at,
+    method,
+    path,
+    query_string,
+    upstream_url,
+    request_headers,
+    request_body,
+    response_status,
+    response_headers,
+    response_body,
+    duration_ms,
+    client_ip,
+    is_stream,
+    upstream_invocation_id,
+    chutes_trace,
+    error
+FROM raw_http_records
+ORDER BY created_at ASC
 """
 
-EXPORT_QUERY_WITH_DATE_RANGE = """\
+RAW_EXPORT_QUERY_WITH_DATE_RANGE = """\
 SELECT
-    t.chat_id,
-    t.parent_chat_id,
-    t.timestamp,
-    t.input_length,
-    t.output_length,
-    t.type,
-    t.turn,
-    t.hash_ids
-FROM anon_usage_traces t
-WHERE t.created_at >= $1 AND t.created_at < $2
-ORDER BY t.created_at ASC
+    request_id,
+    correlation_id,
+    created_at,
+    method,
+    path,
+    query_string,
+    upstream_url,
+    request_headers,
+    request_body,
+    response_status,
+    response_headers,
+    response_body,
+    duration_ms,
+    client_ip,
+    is_stream,
+    upstream_invocation_id,
+    chutes_trace,
+    error
+FROM raw_http_records
+WHERE created_at >= $1 AND created_at < $2
+ORDER BY created_at ASC
 """
 
 
-def row_to_jsonl(row: asyncpg.Record) -> bytes:
-    """Convert a single query row to a Qwen-Bailian JSONL line."""
+def raw_row_to_jsonl(row: asyncpg.Record) -> bytes:
+    request_body_text, request_body_base64 = _decode_body(row["request_body"])
+    response_body_text, response_body_base64 = _decode_body(row["response_body"])
+
     record = {
-        "chat_id": row["chat_id"],
-        "parent_chat_id": row["parent_chat_id"],
-        "timestamp": round(row["timestamp"], 3),
-        "input_length": row["input_length"],
-        "output_length": row["output_length"],
-        "type": row["type"],
-        "turn": row["turn"],
-        "hash_ids": list(row["hash_ids"]),
+        "request_id": str(row["request_id"]),
+        "correlation_id": str(row["correlation_id"]) if row["correlation_id"] else None,
+        "created_at": _to_iso(row["created_at"]),
+        "method": row["method"],
+        "path": row["path"],
+        "query_string": row["query_string"],
+        "upstream_url": row["upstream_url"],
+        "request_headers": _json_field(row["request_headers"]),
+        "request_body_text": request_body_text,
+        "request_body_base64": request_body_base64,
+        "response_status": row["response_status"],
+        "response_headers": _json_field(row["response_headers"]),
+        "response_body_text": response_body_text,
+        "response_body_base64": response_body_base64,
+        "duration_ms": row["duration_ms"],
+        "client_ip": row["client_ip"],
+        "is_stream": row["is_stream"],
+        "upstream_invocation_id": row["upstream_invocation_id"],
+        "chutes_trace": _json_field(row["chutes_trace"]),
+        "error": row["error"],
     }
     return orjson.dumps(record)
 
 
-def _extract_bearer_token(request: Request) -> str | None:
-    auth = request.headers.get("authorization", "")
-    if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return None
-
-
-def create_export_router() -> APIRouter:
-    router = APIRouter(prefix="/internal", tags=["export"])
-
-    @router.get("/export/traces.jsonl")
-    async def export_traces(
-        request: Request,
-        start: str | None = None,
-        end: str | None = None,
-    ):
-        container = request.app.state.container
-        settings = container.settings
-
-        # --- auth gate ---
-        allowed_keys = settings.export_api_keys
-        if not allowed_keys:
-            return JSONResponse(
-                status_code=404,
-                content={"error": "not_found", "detail": "Export endpoint is disabled"},
-            )
-
-        token = _extract_bearer_token(request)
-        if not token or token not in allowed_keys:
-            return JSONResponse(
-                status_code=403,
-                content={"error": "forbidden", "detail": "Invalid or missing API key"},
-            )
-
-        # --- resolve pool ---
-        recorder = container.recorder
-        pool = getattr(recorder, "pool", None)
-        if pool is None:
-            return JSONResponse(
-                status_code=503,
-                content={"error": "unavailable", "detail": "Database recording is not enabled"},
-            )
-
-        # --- parse optional date range ---
-        start_time = _parse_iso(start) if start else None
-        end_time = _parse_iso(end) if end else None
-
-        async def _stream():
-            async with pool.acquire() as conn:
-                if start_time and end_time:
-                    rows = await conn.fetch(EXPORT_QUERY_WITH_DATE_RANGE, start_time, end_time)
-                else:
-                    rows = await conn.fetch(EXPORT_QUERY)
-                for row in rows:
-                    yield row_to_jsonl(row) + b"\n"
-
-        return StreamingResponse(
-            _stream(),
-            media_type="application/x-ndjson",
-            headers={
-                "Content-Disposition": "attachment; filename=traces.jsonl",
-            },
-        )
-
-    return router
-
-
-def _parse_iso(value: str) -> datetime:
-    dt = datetime.fromisoformat(value)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
-
-
-# --- standalone helpers (for CLI / cron use) ---
-
-async def export_traces_jsonl(
+async def export_raw_http_jsonl(
     pool: asyncpg.Pool,
     *,
-    start_time=None,
-    end_time=None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
 ) -> list[bytes]:
-    """Export all anonymized traces as Qwen-Bailian JSONL lines."""
+    """Export raw HTTP records to full-text JSONL rows."""
     async with pool.acquire() as conn:
         if start_time and end_time:
-            rows = await conn.fetch(EXPORT_QUERY_WITH_DATE_RANGE, start_time, end_time)
+            rows = await conn.fetch(RAW_EXPORT_QUERY_WITH_DATE_RANGE, start_time, end_time)
         else:
-            rows = await conn.fetch(EXPORT_QUERY)
+            rows = await conn.fetch(RAW_EXPORT_QUERY)
+    return [raw_row_to_jsonl(row) for row in rows]
 
-    return [row_to_jsonl(row) for row in rows]
 
-
-async def export_traces_to_file(
+async def export_raw_http_to_file(
     pool: asyncpg.Pool,
-    output_path: str,
+    output_path: str | Path,
     *,
-    start_time=None,
-    end_time=None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
 ) -> int:
-    """Export traces to a JSONL file. Returns number of records written."""
-    lines = await export_traces_jsonl(pool, start_time=start_time, end_time=end_time)
-    with open(output_path, "wb") as f:
+    """Write full-text raw HTTP records to a JSONL file and return row count."""
+    lines = await export_raw_http_jsonl(pool, start_time=start_time, end_time=end_time)
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as f:
         for line in lines:
             f.write(line)
             f.write(b"\n")
     return len(lines)
+
+
+def _to_iso(value: Any) -> str | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
+
+def _json_field(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return orjson.loads(value)
+        except orjson.JSONDecodeError:
+            return value
+    return value
+
+
+def _decode_body(body: bytes | bytearray | memoryview) -> tuple[str | None, str | None]:
+    payload = bytes(body)
+    if not payload:
+        return "", None
+    try:
+        return payload.decode("utf-8"), None
+    except UnicodeDecodeError:
+        encoded = base64.b64encode(payload).decode("ascii")
+        return None, encoded

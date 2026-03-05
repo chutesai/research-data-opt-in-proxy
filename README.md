@@ -16,6 +16,7 @@ This service provides:
 - Two independently switchable recording formats:
 1. Full raw HTTP request/response logging (headers + bodies).
 2. An anonymized Qwen Bailian-style usage trace format.
+- A manual (operator-only) full-text JSONL export utility.
 
 ## Core Behavior
 
@@ -47,7 +48,7 @@ Stores:
 - Correlation and trace metadata: correlation ID, invocation IDs, selected target instance/uid/hotkey/coldkey, and parsed trace events.
 - Stream flag and optional transport error field.
 
-Sensitive headers (`authorization`, `x-api-key`, `cookie`, `set-cookie` by default) are replaced with `[REDACTED]` before storage. Configure via `SANITIZED_HEADER_NAMES`.
+Sensitive headers are removed before storage based on `STRIPPED_HEADER_NAMES`.
 
 Table: `raw_http_records`
 
@@ -88,7 +89,7 @@ Required:
 Main:
 - `UPSTREAM_BASE_URL` (default `https://llm.chutes.ai`)
 - `UPSTREAM_DISCOUNT_HEADER_NAME` (optional)
-- `UPSTREAM_DISCOUNT_HEADER_VALUE` (optional)
+- `UPSTREAM_DISCOUNT_HEADER_VALUE` (optional, recommended high-entropy secret)
 - `UPSTREAM_TRACE_HEADER_NAME` (default `X-Chutes-Trace`)
 - `UPSTREAM_TRACE_HEADER_VALUE` (default `true`)
 - `UPSTREAM_CORRELATION_ID_HEADER_NAME` (default `X-Chutes-Correlation-Id`)
@@ -96,7 +97,7 @@ Main:
 - `ENABLE_QWEN_TRACE_RECORDING` (default `false`, keep disabled when collecting full-text traces only)
 
 Security:
-- `SANITIZED_HEADER_NAMES` - comma-separated header names to redact (default `authorization,x-api-key,cookie,set-cookie`)
+- `STRIPPED_HEADER_NAMES` - comma-separated header names removed from recorded header maps (default `authorization,x-api-key,cookie,set-cookie`)
 
 Limits:
 - `MAX_RECORDED_BODY_BYTES` - cap stored body sizes (`0` = no truncation)
@@ -153,7 +154,26 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 Health check:
 
 ```bash
+curl http://localhost:8000/health
 curl http://localhost:8000/healthz
+```
+
+## Manual Full-Text Export
+
+No HTTP export endpoint is exposed. Use the manual script from a trusted shell:
+
+```bash
+python scripts/export_full_text.py \
+  --output ./exports/raw-http-$(date +%F).jsonl
+```
+
+Optional date window:
+
+```bash
+python scripts/export_full_text.py \
+  --output ./exports/raw-http-window.jsonl \
+  --start 2026-03-01T00:00:00+00:00 \
+  --end 2026-03-02T00:00:00+00:00
 ```
 
 ## Testing

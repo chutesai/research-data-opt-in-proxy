@@ -62,10 +62,6 @@ class Settings(BaseSettings):
     # Data retention: days to keep records. 0 = keep forever.
     retention_days: int = 0
 
-    # Comma-separated API keys allowed to call the /export endpoint.
-    # Empty string disables the export endpoint entirely.
-    export_api_key_whitelist: str = ""
-
     @model_validator(mode="after")
     def _salt_must_be_set_when_tracing(self) -> "Settings":
         if self.enable_qwen_trace_recording:
@@ -80,15 +76,6 @@ class Settings(BaseSettings):
     @property
     def normalized_upstream_base_url(self) -> str:
         return str(self.upstream_base_url).rstrip("/")
-
-    @property
-    def export_api_keys(self) -> frozenset[str]:
-        """Set of API keys allowed to call the export endpoint."""
-        return frozenset(
-            k.strip()
-            for k in self.export_api_key_whitelist.split(",")
-            if k.strip()
-        )
 
     @property
     def stripped_header_set(self) -> frozenset[str]:
