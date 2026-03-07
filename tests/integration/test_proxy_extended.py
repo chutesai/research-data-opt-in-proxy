@@ -10,22 +10,43 @@ from app.main import create_app
 from app.recorder import NoopRecorder
 
 
+class _SpyRecorder:
+    def __init__(self):
+        self.calls: list[tuple[object, object]] = []
+
+    async def record(self, raw_record, trace_candidate):
+        self.calls.append((raw_record, trace_candidate))
+
+
+def _recording_settings(**overrides) -> Settings:
+    base = {
+        "database_url": "",
+        "enable_raw_http_recording": True,
+        "enable_qwen_trace_recording": True,
+        "anonymization_hash_salt": "proxy-error-test-salt-long-enough-to-pass",
+        "upstream_base_url": "https://upstream.test",
+        "upstream_discount_header_name": "X-Chutes-Research-OptIn",
+        "upstream_discount_header_value": "true",
+    }
+    base.update(overrides)
+    return Settings(**base)
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_upstream_error_is_recorded(
-    settings_factory,
-    db_truncate,
-    db_fetch_one,
-    db_fetch_value,
-):
-    """When upstream is unreachable, error is recorded and 502 returned."""
-    await db_truncate()
+async def test_upstream_transport_error_is_not_recorded():
+    """When upstream is unreachable, the proxy returns 502 without calling the recorder."""
+    recorder = _SpyRecorder()
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("Connection refused")
 
     transport = httpx.MockTransport(handler)
-    app = create_app(settings_factory(), upstream_transport=transport)
+    app = create_app(
+        _recording_settings(),
+        upstream_transport=transport,
+        recorder_override=recorder,
+    )
 
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
@@ -43,15 +64,46 @@ async def test_upstream_error_is_recorded(
 
     assert resp.status_code == 502
     assert resp.json()["error"] == "upstream_request_failed"
+    assert recorder.calls == []
 
-    raw_count = await db_fetch_value("SELECT COUNT(*) FROM raw_http_records")
-    assert raw_count == 1
 
-    raw_row = await db_fetch_one(
-        "SELECT response_status, error FROM raw_http_records LIMIT 1",
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_upstream_http_error_response_is_not_recorded():
+    """Upstream 4xx/5xx responses are passed through without calling the recorder."""
+    recorder = _SpyRecorder()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=429,
+            headers={"content-type": "application/json"},
+            content=b'{"error":"rate_limit"}',
+        )
+
+    transport = httpx.MockTransport(handler)
+    app = create_app(
+        _recording_settings(),
+        upstream_transport=transport,
+        recorder_override=recorder,
     )
-    assert raw_row["response_status"] == 502
-    assert "Connection refused" in raw_row["error"]
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer test"},
+                json={
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+    assert resp.status_code == 429
+    assert resp.json()["error"] == "rate_limit"
+    assert recorder.calls == []
 
 
 @pytest.mark.integration
@@ -105,6 +157,7 @@ async def test_body_truncation(
 async def test_noop_recorder_no_database_needed():
     """When both recording modes disabled, no DB is needed."""
     settings = Settings(
+        database_url="",
         enable_raw_http_recording=False,
         enable_qwen_trace_recording=False,
         anonymization_hash_salt="noop-test-salt-long-enough-to-pass",
@@ -141,6 +194,7 @@ async def test_noop_recorder_no_database_needed():
 async def test_request_body_too_large():
     """Requests exceeding max_request_body_bytes get 413."""
     settings = Settings(
+        database_url="",
         enable_raw_http_recording=False,
         enable_qwen_trace_recording=False,
         anonymization_hash_salt="body-limit-test-salt-long-enough",
@@ -229,6 +283,7 @@ async def test_auth_and_discount_headers_stripped_from_recording(
 @pytest.mark.asyncio
 async def test_internal_export_path_blocked():
     settings = Settings(
+        database_url="",
         enable_raw_http_recording=False,
         enable_qwen_trace_recording=False,
         anonymization_hash_salt="blocked-export-test-salt-long-enough",

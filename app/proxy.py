@@ -138,39 +138,6 @@ def create_proxy_router() -> APIRouter:
             )
             upstream_response = await container.http_client.send(upstream_request, stream=True)
         except httpx.RequestError as exc:
-            completed_at = datetime.now(timezone.utc)
-            strip_headers = settings.stripped_header_set
-            raw_record = RawHTTPRecord(
-                request_id=request_id,
-                correlation_id=correlation_id,
-                created_at=started_at,
-                method=request.method,
-                path=request.url.path,
-                query_string=query_string,
-                upstream_url=upstream_url,
-                request_headers=_headers_to_multimap(request.headers, strip_keys=strip_headers),
-                request_body=body,
-                response_status=502,
-                response_headers={},
-                response_body=b"",
-                duration_ms=_duration_ms(started_at, completed_at),
-                client_ip=_extract_client_ip(request),
-                is_stream=False,
-                upstream_invocation_id=None,
-                chutes_trace={},
-                error=str(exc),
-            )
-            trace_candidate = build_usage_trace_candidate(
-                request_id=request_id,
-                request_payload=request_payload,
-                response_body=b"",
-                response_content_type="application/json",
-                observed_at=completed_at,
-                anonymization_hash_salt=settings.anonymization_hash_salt,
-                correlation_id=correlation_id,
-                trace_metadata={},
-            )
-            await _safe_record(container.recorder, raw_record, trace_candidate)
             response = JSONResponse(
                 status_code=502,
                 content={
@@ -246,7 +213,8 @@ def create_proxy_router() -> APIRouter:
             correlation_id=correlation_id,
             trace_metadata=trace_metadata,
         )
-        await _safe_record(container.recorder, raw_record, trace_candidate)
+        if _should_record_upstream_result(upstream_response.status_code):
+            await _safe_record(container.recorder, raw_record, trace_candidate)
 
         response_headers = _filter_response_headers(
             upstream_response.headers,
@@ -349,7 +317,8 @@ def _build_streaming_response(
                 correlation_id=correlation_id,
                 trace_metadata=trace_metadata,
             )
-            await _safe_record(container.recorder, raw_record, trace_candidate)
+            if _should_record_upstream_result(upstream_response.status_code):
+                await _safe_record(container.recorder, raw_record, trace_candidate)
 
     response_headers = _filter_response_headers(upstream_response.headers, drop_content_type=True)
     if settings.upstream_correlation_id_header_name:
@@ -442,6 +411,10 @@ def _extract_client_ip(request: Request) -> str | None:
 
 def _duration_ms(started_at: datetime, completed_at: datetime) -> int:
     return max(0, int((completed_at - started_at).total_seconds() * 1000))
+
+
+def _should_record_upstream_result(status_code: int) -> bool:
+    return status_code < 400
 
 
 async def _safe_record(recorder, raw_record, trace_candidate) -> None:
