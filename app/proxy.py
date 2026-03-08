@@ -35,6 +35,7 @@ _HOP_BY_HOP_HEADERS = {
 }
 
 _BLOCKED_PROXY_PATH_PREFIXES = ("/internal/export", "/internal/archive")
+_INTERNAL_HEADER_PREFIXES = ("x-chutes-",)
 
 
 
@@ -147,16 +148,13 @@ def create_proxy_router() -> APIRouter:
             )
             upstream_response = await container.http_client.send(upstream_request, stream=True)
         except httpx.RequestError as exc:
-            response = JSONResponse(
+            return JSONResponse(
                 status_code=502,
                 content={
                     "error": "upstream_request_failed",
                     "detail": str(exc),
                 },
             )
-            if settings.upstream_correlation_id_header_name:
-                response.headers[settings.upstream_correlation_id_header_name] = str(correlation_id)
-            return response
 
         response_content_type = upstream_response.headers.get("content-type", "")
         stream_requested = bool(
@@ -200,10 +198,18 @@ def create_proxy_router() -> APIRouter:
             path=request.url.path,
             query_string=query_string,
             upstream_url=upstream_url,
-            request_headers=_headers_to_multimap(request.headers, strip_keys=strip_headers),
+            request_headers=_headers_to_multimap(
+                request.headers,
+                strip_keys=strip_headers,
+                strip_prefixes=_INTERNAL_HEADER_PREFIXES,
+            ),
             request_body=body,
             response_status=upstream_response.status_code,
-            response_headers=_headers_to_multimap(upstream_response.headers, strip_keys=strip_headers),
+            response_headers=_headers_to_multimap(
+                upstream_response.headers,
+                strip_keys=strip_headers,
+                strip_prefixes=_INTERNAL_HEADER_PREFIXES,
+            ),
             response_body=response_body,
             duration_ms=_duration_ms(started_at, completed_at),
             client_ip=client_ip,
@@ -234,9 +240,8 @@ def create_proxy_router() -> APIRouter:
         response_headers = _filter_response_headers(
             upstream_response.headers,
             drop_content_type=True,
+            strip_prefixes=_INTERNAL_HEADER_PREFIXES,
         )
-        if settings.upstream_correlation_id_header_name:
-            response_headers[settings.upstream_correlation_id_header_name] = str(correlation_id)
 
         return Response(
             content=client_response_body,
@@ -310,10 +315,18 @@ def _build_streaming_response(
                 path=request.url.path,
                 query_string=query_string,
                 upstream_url=upstream_url,
-                request_headers=_headers_to_multimap(request.headers, strip_keys=strip_headers),
+                request_headers=_headers_to_multimap(
+                    request.headers,
+                    strip_keys=strip_headers,
+                    strip_prefixes=_INTERNAL_HEADER_PREFIXES,
+                ),
                 request_body=request_body,
                 response_status=upstream_response.status_code,
-                response_headers=_headers_to_multimap(upstream_response.headers, strip_keys=strip_headers),
+                response_headers=_headers_to_multimap(
+                    upstream_response.headers,
+                    strip_keys=strip_headers,
+                    strip_prefixes=_INTERNAL_HEADER_PREFIXES,
+                ),
                 response_body=bytes(captured_chunks),
                 duration_ms=_duration_ms(started_at, completed_at),
                 client_ip=client_ip,
@@ -341,9 +354,11 @@ def _build_streaming_response(
                     trace_candidate=trace_candidate,
                 )
 
-    response_headers = _filter_response_headers(upstream_response.headers, drop_content_type=True)
-    if settings.upstream_correlation_id_header_name:
-        response_headers[settings.upstream_correlation_id_header_name] = str(correlation_id)
+    response_headers = _filter_response_headers(
+        upstream_response.headers,
+        drop_content_type=True,
+        strip_prefixes=_INTERNAL_HEADER_PREFIXES,
+    )
 
     return StreamingResponse(
         _iterator(),
@@ -377,11 +392,14 @@ def _filter_response_headers(
     headers: httpx.Headers,
     *,
     drop_content_type: bool,
+    strip_prefixes: tuple[str, ...] = (),
 ) -> dict[str, str]:
     filtered: dict[str, str] = {}
     for key, value in headers.multi_items():
         key_lower = key.lower()
         if key_lower in _HOP_BY_HOP_HEADERS:
+            continue
+        if any(key_lower.startswith(prefix) for prefix in strip_prefixes):
             continue
         if key_lower == "content-length":
             continue
@@ -395,6 +413,7 @@ def _headers_to_multimap(
     headers,
     *,
     strip_keys: frozenset[str] | None = None,
+    strip_prefixes: tuple[str, ...] = (),
 ) -> dict[str, list[str]]:
     output: dict[str, list[str]] = {}
 
@@ -404,6 +423,8 @@ def _headers_to_multimap(
             key = key_bytes.decode("latin-1").lower()
             if strip_keys and key in strip_keys:
                 continue
+            if any(key.startswith(prefix) for prefix in strip_prefixes):
+                continue
             value = value_bytes.decode("latin-1")
             output.setdefault(key, []).append(value)
         return output
@@ -411,6 +432,8 @@ def _headers_to_multimap(
     for key, value in headers.multi_items():
         key_lower = key.lower()
         if strip_keys and key_lower in strip_keys:
+            continue
+        if any(key_lower.startswith(prefix) for prefix in strip_prefixes):
             continue
         output.setdefault(key_lower, []).append(value)
     return output

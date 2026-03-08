@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-from uuid import UUID
 
 import httpx
 import pytest
@@ -61,7 +60,7 @@ async def test_live_llm_proxy_end_to_end(
                 pytest.skip("Live upstream inference timed out during e2e run")
 
     assert chat_resp.status_code == 200, chat_resp.text
-    assert UUID(chat_resp.headers["x-chutes-correlation-id"])
+    assert "x-chutes-correlation-id" not in chat_resp.headers
     chat_payload = chat_resp.json()
     assert isinstance(chat_payload.get("choices"), list)
 

@@ -231,7 +231,10 @@ async def test_auth_and_discount_headers_stripped_from_recording(
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             status_code=200,
-            headers={"content-type": "application/json"},
+            headers={
+                "content-type": "application/json",
+                "x-chutes-invocationid": "inv-123",
+            },
             content=b'{"choices":[{"message":{"content":"ok"}}]}',
         )
 
@@ -257,24 +260,30 @@ async def test_auth_and_discount_headers_stripped_from_recording(
     assert resp.status_code == 200
 
     raw = await db_fetch_one(
-        "SELECT request_headers, correlation_id FROM raw_http_records LIMIT 1",
+        "SELECT request_headers, response_headers, correlation_id FROM raw_http_records LIMIT 1",
     )
-    headers_dict = raw["request_headers"]
-    if isinstance(headers_dict, str):
+    request_headers_dict = raw["request_headers"]
+    if isinstance(request_headers_dict, str):
         import json
-        headers_dict = json.loads(headers_dict)
+        request_headers_dict = json.loads(request_headers_dict)
+    response_headers_dict = raw["response_headers"]
+    if isinstance(response_headers_dict, str):
+        import json
+        response_headers_dict = json.loads(response_headers_dict)
 
     # Authorization must be completely absent, not redacted
-    assert "authorization" not in headers_dict
+    assert "authorization" not in request_headers_dict
     # Discount header must also be absent
-    assert "x-chutes-research-optin" not in headers_dict
-    assert "x-chutes-trace" not in headers_dict
-    assert "x-chutes-correlation-id" not in headers_dict
-    assert "forwarded" not in headers_dict
-    assert "x-vercel-oidc-token" not in headers_dict
-    assert "x-vercel-proxy-signature" not in headers_dict
+    assert "x-chutes-research-optin" not in request_headers_dict
+    assert "x-chutes-trace" not in request_headers_dict
+    assert "x-chutes-correlation-id" not in request_headers_dict
+    assert "x-chutes-realip" not in request_headers_dict
+    assert "forwarded" not in request_headers_dict
+    assert "x-vercel-oidc-token" not in request_headers_dict
+    assert "x-vercel-proxy-signature" not in request_headers_dict
+    assert "x-chutes-invocationid" not in response_headers_dict
     # Normal headers should still be present
-    assert "content-type" in headers_dict
+    assert "content-type" in request_headers_dict
     assert raw["correlation_id"] is not None
     UUID(str(raw["correlation_id"]))
 

@@ -4,14 +4,26 @@ from app.config import Settings
 from app.main import _create_http_client
 
 
-def test_create_http_client_enables_http2_and_custom_limits_by_default():
+def test_create_http_client_uses_http1_and_custom_limits_by_default():
     client = _create_http_client(settings=Settings())
     try:
         transport = client._transport
         assert isinstance(transport, httpx.AsyncHTTPTransport)
-        assert transport._pool._http2 is True
+        assert transport._pool._http2 is False
         assert transport._pool._max_connections == 200
         assert transport._pool._max_keepalive_connections == 100
+    finally:
+        import asyncio
+
+        asyncio.run(client.aclose())
+
+
+def test_create_http_client_can_enable_http2_explicitly():
+    client = _create_http_client(settings=Settings(upstream_http2_enabled=True))
+    try:
+        transport = client._transport
+        assert isinstance(transport, httpx.AsyncHTTPTransport)
+        assert transport._pool._http2 is True
     finally:
         import asyncio
 

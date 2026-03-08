@@ -45,7 +45,7 @@ def _create_http_client(
     if upstream_transport is not None:
         client_kwargs["transport"] = upstream_transport
     else:
-        client_kwargs["http2"] = True
+        client_kwargs["http2"] = settings.upstream_http2_enabled
         client_kwargs["limits"] = httpx.Limits(
             max_connections=200,
             max_keepalive_connections=100,

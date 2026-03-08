@@ -83,8 +83,7 @@ async def test_archive_and_export_internal_endpoints(
                 json={"model": "m", "messages": [{"role": "user", "content": "hello"}]},
             )
             assert proxied.status_code == 200
-            response_correlation_id = proxied.headers["x-chutes-correlation-id"]
-            assert UUID(response_correlation_id)
+            assert "x-chutes-correlation-id" not in proxied.headers
 
             unauthorized_archive = await client.post("/internal/archive/run")
             assert unauthorized_archive.status_code == 401
@@ -120,7 +119,9 @@ async def test_archive_and_export_internal_endpoints(
             )
             assert row["req_len"] == 0
             assert row["resp_len"] == 0
-            assert str(row["correlation_id"]) == response_correlation_id
+            assert row["correlation_id"] is not None
+            response_correlation_id = str(row["correlation_id"])
+            assert UUID(response_correlation_id)
             assert row["request_blob_key"] is not None
             assert row["response_blob_key"] is not None
             assert row["request_blob_url"].startswith("mem://")

@@ -60,8 +60,26 @@ def test_environment_defaults_from_vercel_target_env():
 
 @pytest.mark.unit
 def test_bool_settings_strip_whitespace():
-    s = Settings(archive_on_ingest="true\n")
+    s = Settings(
+        archive_on_ingest="true\n",
+        upstream_http2_enabled="true\n",
+    )
     assert s.archive_on_ingest is True
+    assert s.upstream_http2_enabled is True
+
+
+@pytest.mark.unit
+def test_numeric_settings_strip_whitespace():
+    s = Settings(
+        rate_limit_requests="12000\n",
+        rate_limit_window_seconds="60\n",
+        retention_days="7\n",
+        archive_batch_size="500\n",
+    )
+    assert s.rate_limit_requests == 12000
+    assert s.rate_limit_window_seconds == 60
+    assert s.retention_days == 7
+    assert s.archive_batch_size == 500
 
 
 @pytest.mark.unit

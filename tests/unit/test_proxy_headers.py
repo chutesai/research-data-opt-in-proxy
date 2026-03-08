@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pytest
+import httpx
 
-from app.proxy import _build_forward_headers, _headers_to_multimap
+from app.proxy import _build_forward_headers, _filter_response_headers, _headers_to_multimap
 
 
 class _FakeHeaders:
@@ -71,6 +72,21 @@ def test_headers_to_multimap_strips_sensitive():
 
 
 @pytest.mark.unit
+def test_headers_to_multimap_strips_x_chutes_prefixes():
+    headers = _FakeHeaders([
+        ("content-type", "application/json"),
+        ("x-chutes-invocationid", "inv-123"),
+        ("x-chutes-correlation-id", "corr-123"),
+    ])
+
+    result = _headers_to_multimap(headers, strip_prefixes=("x-chutes-",))
+
+    assert "content-type" in result
+    assert "x-chutes-invocationid" not in result
+    assert "x-chutes-correlation-id" not in result
+
+
+@pytest.mark.unit
 def test_headers_to_multimap_no_strip():
     headers = _FakeHeaders([
         ("authorization", "Bearer sk-secret-key"),
@@ -80,3 +96,26 @@ def test_headers_to_multimap_no_strip():
     result = _headers_to_multimap(headers)
     assert result["authorization"] == ["Bearer sk-secret-key"]
     assert result["content-type"] == ["application/json"]
+
+
+@pytest.mark.unit
+def test_filter_response_headers_strips_x_chutes_prefixes():
+    headers = httpx.Headers(
+        {
+            "content-type": "application/json",
+            "x-chutes-invocationid": "inv-123",
+            "x-chutes-correlation-id": "corr-123",
+            "x-other": "ok",
+        }
+    )
+
+    result = _filter_response_headers(
+        headers,
+        drop_content_type=False,
+        strip_prefixes=("x-chutes-",),
+    )
+
+    assert "content-type" in {key.lower() for key in result}
+    assert "x-other" in {key.lower() for key in result}
+    assert "x-chutes-invocationid" not in {key.lower() for key in result}
+    assert "x-chutes-correlation-id" not in {key.lower() for key in result}

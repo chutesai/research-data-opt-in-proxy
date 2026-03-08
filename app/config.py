@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     upstream_trace_header_value: str = "true"
     upstream_correlation_id_header_name: str = "X-Chutes-Correlation-Id"
     upstream_real_ip_header_name: str = "X-Chutes-RealIP"
+    upstream_http2_enabled: bool = False
 
     database_url: str = Field(default="", min_length=0)
 
@@ -94,6 +95,18 @@ class Settings(BaseSettings):
         "enable_raw_http_recording",
         "enable_qwen_trace_recording",
         "archive_on_ingest",
+        "upstream_http2_enabled",
+        "http_connect_timeout_seconds",
+        "http_read_timeout_seconds",
+        "http_write_timeout_seconds",
+        "http_pool_timeout_seconds",
+        "max_recorded_body_bytes",
+        "max_request_body_bytes",
+        "max_stream_buffer_bytes",
+        "rate_limit_requests",
+        "rate_limit_window_seconds",
+        "retention_days",
+        "archive_batch_size",
         mode="before",
     )
     @classmethod

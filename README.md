@@ -33,10 +33,10 @@ The service:
 4. `X-Chutes-RealIP: <client-ip>` (forwarded real client IP for upstream tracking)
 - Generates a fresh correlation ID per proxied request and reuses the same value for:
 1. Upstream forwarded `X-Chutes-Correlation-Id`.
-2. Downstream response `X-Chutes-Correlation-Id`.
-3. Stored `raw_http_records.correlation_id`.
-4. Exported JSONL `correlation_id`.
+2. Stored `raw_http_records.correlation_id`.
+3. Exported JSONL `correlation_id`.
 - Removes caller-supplied versions of managed headers before forwarding, then sets canonical values.
+- Strips `X-Chutes-*` headers from downstream client responses.
 - Returns upstream responses while preserving OpenAI-compatible semantics (including SSE streaming for `stream=true`).
 - Unwraps Chutes trace envelopes so downstream clients still receive OpenAI-compatible payloads.
 - Stores recording data in Postgres when enabled.
@@ -103,6 +103,7 @@ Main:
 - `UPSTREAM_TRACE_HEADER_VALUE` (default `true`)
 - `UPSTREAM_CORRELATION_ID_HEADER_NAME` (default `X-Chutes-Correlation-Id`)
 - `UPSTREAM_REAL_IP_HEADER_NAME` (default `X-Chutes-RealIP`)
+- `UPSTREAM_HTTP2_ENABLED` (default `false`; keep disabled unless upstream HTTP/2 is known stable)
 - `EXPORT_ENDPOINT_SECRET` (required to enable `/internal/export/raw-http.jsonl`)
 - `EXPORT_ENDPOINT_SECRET_HEADER_NAME` (default `X-Chutes-Export-Secret`)
 - `ARCHIVE_ENDPOINT_SECRET` (required to enable `/internal/archive/run`)
@@ -279,8 +280,9 @@ Then set environment variables in Vercel project settings (or with CLI) before f
 - Do not commit secrets (`DATABASE_URL`, salts, API keys). The `.gitignore` already excludes `.env.*` files.
 - `ANONYMIZATION_HASH_SALT` must be a real secret. The app will refuse to start with placeholder values.
 - Authorization headers and API keys are automatically redacted in raw HTTP recordings before storage.
-- Internal managed headers (`X-Chutes-Research-OptIn`, `X-Chutes-Trace`, `X-Chutes-Correlation-Id`, `X-Chutes-RealIP`) are stripped from stored header maps.
+- Internal managed headers and upstream `X-Chutes-*` response headers are stripped from stored header maps.
 - Hop-by-hop headers (connection, transfer-encoding, upgrade, etc.) are stripped from both forwarded requests and responses.
+- Proxy-managed `X-Chutes-*` headers are not relayed back to downstream clients.
 - Configure `RATE_LIMIT_REQUESTS` in production to prevent abuse.
 - Set `RETENTION_DAYS` and run periodic cleanup to manage storage growth.
 - For the research endpoint, publish clear user messaging that usage is opt-in and recorded.

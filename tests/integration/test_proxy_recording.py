@@ -66,9 +66,8 @@ async def test_non_stream_proxy_records_raw_and_trace(
     assert resp.status_code == 200
     body = resp.json()
     assert body["choices"][0]["message"]["content"] == "hello"
-    response_correlation_id = resp.headers["x-chutes-correlation-id"]
-    assert UUID(response_correlation_id)
-    assert response_correlation_id == seen["forwarded_correlation_id"]
+    assert "x-chutes-correlation-id" not in resp.headers
+    assert "x-chutes-invocationid" not in resp.headers
 
     raw_count = await db_fetch_value("SELECT COUNT(*) FROM raw_http_records")
     trace_count = await db_fetch_value("SELECT COUNT(*) FROM anon_usage_traces")
@@ -86,14 +85,14 @@ async def test_non_stream_proxy_records_raw_and_trace(
     assert trace_row["type"] == "text"
     assert metadata["upstream_invocation_id"] == "parent-invocation-123"
     assert UUID(metadata["correlation_id"])
-    assert metadata["correlation_id"] == response_correlation_id
+    assert metadata["correlation_id"] == seen["forwarded_correlation_id"]
 
     raw_row = await db_fetch_one(
         "SELECT correlation_id, upstream_invocation_id FROM raw_http_records LIMIT 1",
     )
     assert raw_row["upstream_invocation_id"] == "parent-invocation-123"
     assert raw_row["correlation_id"] is not None
-    assert str(raw_row["correlation_id"]) == response_correlation_id
+    assert str(raw_row["correlation_id"]) == seen["forwarded_correlation_id"]
 
 
 @pytest.mark.integration
@@ -145,6 +144,8 @@ async def test_stream_proxy_records_sse_response(
     assert "data:" in resp.text
     assert '"trace"' not in resp.text
     assert '"delta":{"content":"A"}' in resp.text
+    assert "x-chutes-correlation-id" not in resp.headers
+    assert "x-chutes-invocationid" not in resp.headers
 
     raw = await db_fetch_one(
         "SELECT is_stream, response_body, chutes_trace, correlation_id, upstream_invocation_id FROM raw_http_records LIMIT 1",
@@ -214,4 +215,6 @@ async def test_non_stream_trace_envelope_is_unwrapped(
 
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("application/json")
+    assert "x-chutes-correlation-id" not in resp.headers
+    assert "x-chutes-invocationid" not in resp.headers
     assert resp.json()["choices"][0]["message"]["content"] == "ok"
