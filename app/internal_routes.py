@@ -7,7 +7,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.archive_worker import archive_small_batch
-from app.export import export_raw_http_jsonl
+from app.db import cleanup_old_records
+from app.export import iter_raw_http_jsonl
 
 
 def create_internal_router() -> APIRouter:
@@ -54,6 +55,11 @@ def create_internal_router() -> APIRouter:
             limit=batch_limit,
         )
 
+        cleanup = await cleanup_old_records(
+            container.db_pool,
+            retention_days=settings.retention_days,
+        )
+
         return {
             "ok": True,
             "attempted": result.attempted,
@@ -61,6 +67,7 @@ def create_internal_router() -> APIRouter:
             "failed": result.failed,
             "skipped_due_to_lock": result.skipped_due_to_lock,
             "batch_limit": batch_limit,
+            "cleanup": cleanup,
         }
 
     @router.get("/internal/export/raw-http.jsonl", include_in_schema=False)
@@ -99,17 +106,15 @@ def create_internal_router() -> APIRouter:
             )
 
         object_storage = container.object_storage if resolve_archived_bodies else None
-        lines = await export_raw_http_jsonl(
-            container.db_pool,
-            start_time=start_dt,
-            end_time=end_dt,
-            limit=limit,
-            object_storage=object_storage,
-            resolve_archived_bodies=resolve_archived_bodies,
-        )
-
         async def _iter_lines():
-            for line in lines:
+            async for line in iter_raw_http_jsonl(
+                container.db_pool,
+                start_time=start_dt,
+                end_time=end_dt,
+                limit=limit,
+                object_storage=object_storage,
+                resolve_archived_bodies=resolve_archived_bodies,
+            ):
                 yield line + b"\n"
 
         return StreamingResponse(

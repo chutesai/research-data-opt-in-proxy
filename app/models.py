@@ -29,6 +29,12 @@ class RawHTTPRecord:
     request_body_sha256: str | None = None
     response_body_size_bytes: int | None = None
     response_body_sha256: str | None = None
+    request_blob_key: str | None = None
+    request_blob_url: str | None = None
+    response_blob_key: str | None = None
+    response_blob_url: str | None = None
+    archived_at: datetime | None = None
+    archive_error: str | None = None
     error: str | None = None
 
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
-from pydantic import AnyHttpUrl, Field, model_validator
+from pydantic import AnyHttpUrl, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,7 +16,13 @@ class Settings(BaseSettings):
     )
 
     service_name: str = "research-data-opt-in-proxy"
-    environment: str = "development"
+    environment: str = Field(
+        default_factory=lambda: (
+            os.getenv("VERCEL_TARGET_ENV")
+            or os.getenv("VERCEL_ENV")
+            or "development"
+        )
+    )
 
     upstream_base_url: AnyHttpUrl = "https://llm.chutes.ai"
     upstream_discount_header_name: str | None = None
@@ -23,6 +30,7 @@ class Settings(BaseSettings):
     upstream_trace_header_name: str = "X-Chutes-Trace"
     upstream_trace_header_value: str = "true"
     upstream_correlation_id_header_name: str = "X-Chutes-Correlation-Id"
+    upstream_real_ip_header_name: str = "X-Chutes-RealIP"
 
     database_url: str = Field(default="", min_length=0)
 
@@ -33,7 +41,8 @@ class Settings(BaseSettings):
     archive_endpoint_secret_header_name: str = "X-Chutes-Archive-Secret"
 
     enable_raw_http_recording: bool = True
-    enable_qwen_trace_recording: bool = True
+    enable_qwen_trace_recording: bool = False
+    archive_on_ingest: bool = False
 
     # A secret salt used for anonymized SipHash-2-4 token block hashes.
     # MUST be set explicitly; the default will cause a validation error when
@@ -80,6 +89,18 @@ class Settings(BaseSettings):
     archive_s3_region: str = ""
     vercel_blob_read_write_token: str = ""
     vercel_blob_access: str = "private"
+
+    @field_validator(
+        "enable_raw_http_recording",
+        "enable_qwen_trace_recording",
+        "archive_on_ingest",
+        mode="before",
+    )
+    @classmethod
+    def _strip_bool_strings(cls, value):
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
     @model_validator(mode="after")
     def _salt_must_be_set_when_tracing(self) -> "Settings":
@@ -129,6 +150,8 @@ class Settings(BaseSettings):
             managed.add(self.upstream_trace_header_name.lower())
         if self.upstream_correlation_id_header_name:
             managed.add(self.upstream_correlation_id_header_name.lower())
+        if self.upstream_real_ip_header_name:
+            managed.add(self.upstream_real_ip_header_name.lower())
         return frozenset(managed)
 
     @property

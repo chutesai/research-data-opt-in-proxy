@@ -53,6 +53,7 @@ def test_trace_sse_unwrapper_drops_trace_events():
     text = out.decode("utf-8")
 
     assert '"trace"' not in text
+    assert ": trace" in text
     assert 'data: {"choices":[{"delta":{"content":"hello"}}]}' in text
 
 

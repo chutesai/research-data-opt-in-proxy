@@ -2,18 +2,27 @@ from __future__ import annotations
 
 from datetime import timezone
 import hashlib
+from datetime import datetime
+import asyncio
 
 import asyncpg
 import orjson
 
 from app.config import Settings
 from app.models import RawHTTPRecord, UsageTraceCandidate
+from app.object_storage import ObjectStorage
 
 
 class PostgresRecorder:
-    def __init__(self, pool: asyncpg.Pool, settings: Settings):
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        settings: Settings,
+        object_storage: ObjectStorage | None = None,
+    ):
         self.pool = pool
         self.settings = settings
+        self.object_storage = object_storage
 
     async def record(
         self,
@@ -27,6 +36,8 @@ class PostgresRecorder:
             await self._record_trace(trace_candidate)
 
     async def _record_raw_http(self, record: RawHTTPRecord) -> None:
+        record = await self._archive_inline_if_enabled(record)
+
         request_body = _truncate_bytes(record.request_body, self.settings.max_recorded_body_bytes)
         response_body = _truncate_bytes(record.response_body, self.settings.max_recorded_body_bytes)
         request_size = (
@@ -56,11 +67,17 @@ class PostgresRecorder:
                 request_body,
                 request_body_size_bytes,
                 request_body_sha256,
+                request_blob_key,
+                request_blob_url,
                 response_status,
                 response_headers,
                 response_body,
                 response_body_size_bytes,
                 response_body_sha256,
+                response_blob_key,
+                response_blob_url,
+                archived_at,
+                archive_error,
                 duration_ms,
                 client_ip,
                 is_stream,
@@ -68,7 +85,7 @@ class PostgresRecorder:
                 chutes_trace,
                 error
             ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,$18,$19,$20,$21::jsonb,$22
+                $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27::jsonb,$28
             )
             """,
             record.request_id,
@@ -82,11 +99,17 @@ class PostgresRecorder:
             request_body,
             request_size,
             request_sha256,
+            record.request_blob_key,
+            record.request_blob_url,
             record.response_status,
             orjson.dumps(record.response_headers).decode("utf-8"),
             response_body,
             response_size,
             response_sha256,
+            record.response_blob_key,
+            record.response_blob_url,
+            record.archived_at,
+            record.archive_error,
             record.duration_ms,
             record.client_ip,
             record.is_stream,
@@ -94,6 +117,72 @@ class PostgresRecorder:
             orjson.dumps(record.chutes_trace).decode("utf-8"),
             record.error,
         )
+
+    async def _archive_inline_if_enabled(self, record: RawHTTPRecord) -> RawHTTPRecord:
+        if not self.settings.archive_on_ingest or self.object_storage is None:
+            return record
+
+        if not record.request_body and not record.response_body:
+            return record
+
+        created_at = record.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+
+        date_prefix = created_at.strftime("%Y/%m/%d")
+        base_key = (
+            f"{self.settings.archive_object_prefix.strip('/')}/"
+            f"{date_prefix}/{record.request_id}"
+        )
+
+        async def _store_request():
+            if not record.request_body:
+                return None
+            return await self.object_storage.put_bytes(
+                key=f"{base_key}/request.bin",
+                payload=record.request_body,
+                content_type="application/octet-stream",
+            )
+
+        async def _store_response():
+            if not record.response_body:
+                return None
+            return await self.object_storage.put_bytes(
+                key=f"{base_key}/response.bin",
+                payload=record.response_body,
+                content_type="application/octet-stream",
+            )
+
+        try:
+            request_obj, response_obj = await asyncio.gather(
+                _store_request(),
+                _store_response(),
+            )
+        except Exception as exc:
+            record.archive_error = str(exc)[:1200]
+            return record
+
+        record.request_body_size_bytes = len(record.request_body)
+        record.request_body_sha256 = hashlib.sha256(record.request_body).hexdigest()
+        record.response_body_size_bytes = len(record.response_body)
+        record.response_body_sha256 = hashlib.sha256(record.response_body).hexdigest()
+
+        if request_obj is not None:
+            record.request_blob_key = request_obj.key
+            record.request_blob_url = request_obj.url
+            record.request_body_sha256 = request_obj.sha256
+            record.request_body_size_bytes = request_obj.size_bytes
+        if response_obj is not None:
+            record.response_blob_key = response_obj.key
+            record.response_blob_url = response_obj.url
+            record.response_body_sha256 = response_obj.sha256
+            record.response_body_size_bytes = response_obj.size_bytes
+
+        record.request_body = b""
+        record.response_body = b""
+        record.archived_at = datetime.now(timezone.utc)
+        record.archive_error = None
+        return record
 
     async def _record_trace(self, trace: UsageTraceCandidate) -> None:
         async with self.pool.acquire() as conn:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -91,6 +92,7 @@ def create_proxy_router() -> APIRouter:
             )
 
         request_payload = parse_json_bytes(body)
+        client_ip = _extract_client_ip(request)
 
         query_string = request.url.query or ""
         path_segment = full_path.lstrip("/")
@@ -115,6 +117,13 @@ def create_proxy_router() -> APIRouter:
                 (
                     settings.upstream_correlation_id_header_name,
                     str(correlation_id),
+                )
+            )
+        if settings.upstream_real_ip_header_name and client_ip:
+            forward_headers.append(
+                (
+                    settings.upstream_real_ip_header_name,
+                    client_ip,
                 )
             )
         if (
@@ -163,6 +172,7 @@ def create_proxy_router() -> APIRouter:
                 request_body=body,
                 started_at=started_at,
                 correlation_id=correlation_id,
+                client_ip=client_ip,
                 query_string=query_string,
                 upstream_url=upstream_url,
                 upstream_response=upstream_response,
@@ -196,7 +206,7 @@ def create_proxy_router() -> APIRouter:
             response_headers=_headers_to_multimap(upstream_response.headers, strip_keys=strip_headers),
             response_body=response_body,
             duration_ms=_duration_ms(started_at, completed_at),
-            client_ip=_extract_client_ip(request),
+            client_ip=client_ip,
             is_stream=False,
             upstream_invocation_id=_as_optional_str(trace_metadata.get("upstream_invocation_id")),
             chutes_trace=trace_metadata,
@@ -214,7 +224,12 @@ def create_proxy_router() -> APIRouter:
             trace_metadata=trace_metadata,
         )
         if _should_record_upstream_result(upstream_response.status_code):
-            await _safe_record(container.recorder, raw_record, trace_candidate)
+            _spawn_record_task(
+                request=request,
+                recorder=container.recorder,
+                raw_record=raw_record,
+                trace_candidate=trace_candidate,
+            )
 
         response_headers = _filter_response_headers(
             upstream_response.headers,
@@ -241,6 +256,7 @@ def _build_streaming_response(
     request_body: bytes,
     started_at: datetime,
     correlation_id,
+    client_ip: str | None,
     query_string: str,
     upstream_url: str,
     upstream_response: httpx.Response,
@@ -300,7 +316,7 @@ def _build_streaming_response(
                 response_headers=_headers_to_multimap(upstream_response.headers, strip_keys=strip_headers),
                 response_body=bytes(captured_chunks),
                 duration_ms=_duration_ms(started_at, completed_at),
-                client_ip=_extract_client_ip(request),
+                client_ip=client_ip,
                 is_stream=True,
                 upstream_invocation_id=_as_optional_str(trace_metadata.get("upstream_invocation_id")),
                 chutes_trace=trace_metadata,
@@ -318,7 +334,12 @@ def _build_streaming_response(
                 trace_metadata=trace_metadata,
             )
             if _should_record_upstream_result(upstream_response.status_code):
-                await _safe_record(container.recorder, raw_record, trace_candidate)
+                _spawn_record_task(
+                    request=request,
+                    recorder=container.recorder,
+                    raw_record=raw_record,
+                    trace_candidate=trace_candidate,
+                )
 
     response_headers = _filter_response_headers(upstream_response.headers, drop_content_type=True)
     if settings.upstream_correlation_id_header_name:
@@ -422,6 +443,13 @@ async def _safe_record(recorder, raw_record, trace_candidate) -> None:
         await recorder.record(raw_record, trace_candidate)
     except Exception as exc:  # pragma: no cover - defensive path
         logger.exception("Failed to record usage data: %s", exc)
+
+
+def _spawn_record_task(*, request: Request, recorder, raw_record, trace_candidate) -> None:
+    task = asyncio.create_task(_safe_record(recorder, raw_record, trace_candidate))
+    pending_tasks = request.app.state.container.pending_tasks
+    pending_tasks.add(task)
+    task.add_done_callback(pending_tasks.discard)
 
 
 def _as_optional_str(value) -> str | None:

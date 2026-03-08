@@ -281,6 +281,49 @@ async def test_auth_and_discount_headers_stripped_from_recording(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_real_ip_header_forwarded_from_proxy_extraction():
+    captured_headers: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_headers.update(dict(request.headers))
+        return httpx.Response(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            content=b'{"choices":[{"message":{"content":"ok"}}]}',
+        )
+
+    transport = httpx.MockTransport(handler)
+    settings = Settings(
+        database_url="",
+        enable_raw_http_recording=False,
+        enable_qwen_trace_recording=False,
+        anonymization_hash_salt="real-ip-forwarding-test-salt-long-enough",
+        upstream_base_url="https://upstream.test",
+        upstream_discount_header_name="X-Chutes-Research-OptIn",
+        upstream_discount_header_value="true",
+    )
+    app = create_app(settings, upstream_transport=transport)
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                headers={
+                    "X-Forwarded-For": "203.0.113.10, 10.0.0.5",
+                    "X-Chutes-RealIP": "198.51.100.77",
+                },
+                json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
+            )
+
+    assert resp.status_code == 200
+    assert captured_headers["x-chutes-realip"] == "203.0.113.10"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_internal_export_path_blocked():
     settings = Settings(
         database_url="",

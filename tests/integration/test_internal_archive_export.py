@@ -149,3 +149,66 @@ async def test_archive_and_export_internal_endpoints(
             assert exported["request_body_sha256"]
             assert exported["response_body_sha256"]
             assert exported["correlation_id"] == response_correlation_id
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_inline_archive_on_ingest_stores_bodies_in_object_storage(
+    settings_factory,
+    db_truncate,
+    db_fetch_one,
+):
+    await db_truncate()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            content=b'{"choices":[{"message":{"content":"ok"}}]}',
+        )
+
+    settings = settings_factory(
+        enable_qwen_trace_recording=False,
+        archive_on_ingest=True,
+    )
+
+    app = create_app(settings, upstream_transport=httpx.MockTransport(handler))
+    fake_storage = _FakeObjectStorage()
+
+    async with app.router.lifespan_context(app):
+        app.state.container.object_storage = fake_storage
+        app.state.container.recorder.object_storage = fake_storage
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={"model": "m", "messages": [{"role": "user", "content": "hello"}]},
+            )
+
+    assert resp.status_code == 200
+
+    row = await db_fetch_one(
+        """
+        SELECT
+            octet_length(request_body) AS req_len,
+            octet_length(response_body) AS resp_len,
+            request_blob_key,
+            request_blob_url,
+            response_blob_key,
+            response_blob_url,
+            archived_at
+        FROM raw_http_records
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+    )
+    assert row["req_len"] == 0
+    assert row["resp_len"] == 0
+    assert row["request_blob_key"] is not None
+    assert row["request_blob_url"].startswith("mem://")
+    assert row["response_blob_key"] is not None
+    assert row["response_blob_url"].startswith("mem://")
+    assert row["archived_at"] is not None

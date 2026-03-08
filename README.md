@@ -30,6 +30,7 @@ The service:
 1. `X-Chutes-Research-OptIn: <secret token>` (discount routing signal)
 2. `X-Chutes-Trace: true` (enable upstream trace envelopes)
 3. `X-Chutes-Correlation-Id: <uuid>` (request correlation)
+4. `X-Chutes-RealIP: <client-ip>` (forwarded real client IP for upstream tracking)
 - Generates a fresh correlation ID per proxied request and reuses the same value for:
 1. Upstream forwarded `X-Chutes-Correlation-Id`.
 2. Downstream response `X-Chutes-Correlation-Id`.
@@ -101,16 +102,18 @@ Main:
 - `UPSTREAM_TRACE_HEADER_NAME` (default `X-Chutes-Trace`)
 - `UPSTREAM_TRACE_HEADER_VALUE` (default `true`)
 - `UPSTREAM_CORRELATION_ID_HEADER_NAME` (default `X-Chutes-Correlation-Id`)
+- `UPSTREAM_REAL_IP_HEADER_NAME` (default `X-Chutes-RealIP`)
 - `EXPORT_ENDPOINT_SECRET` (required to enable `/internal/export/raw-http.jsonl`)
 - `EXPORT_ENDPOINT_SECRET_HEADER_NAME` (default `X-Chutes-Export-Secret`)
 - `ARCHIVE_ENDPOINT_SECRET` (required to enable `/internal/archive/run`)
 - `ARCHIVE_ENDPOINT_SECRET_HEADER_NAME` (default `X-Chutes-Archive-Secret`)
 - `ENABLE_RAW_HTTP_RECORDING` (default `true`)
 - `ENABLE_QWEN_TRACE_RECORDING` (default `false`, keep disabled when collecting full-text traces only)
+- `ARCHIVE_ON_INGEST` (default `false`; when `true` and object storage is configured, request/response bodies are uploaded immediately and omitted from DB rows)
 
 Object storage archive:
 - `ARCHIVE_STORAGE_PROVIDER` (`auto`, `s3`, `vercel_blob`)
-- `ARCHIVE_BATCH_SIZE` (default `100`)
+- `ARCHIVE_BATCH_SIZE` (default `500`)
 - `ARCHIVE_OBJECT_PREFIX` (default `raw-http-archive`)
 - `ARCHIVE_S3_BUCKET` / `ARCHIVE_S3_REGION`
 - `VERCEL_BLOB_READ_WRITE_TOKEN` / `VERCEL_BLOB_ACCESS`
@@ -126,9 +129,11 @@ Limits:
 - `RATE_LIMIT_WINDOW_SECONDS` - rate limit window (default `60`)
 
 Recommended production baseline:
-- Set `RATE_LIMIT_REQUESTS` to a non-zero value (for example `600`) with `RATE_LIMIT_WINDOW_SECONDS=60`.
+- Set `RATE_LIMIT_REQUESTS` to a non-zero value sized above your expected per-IP burst rate.
 - Keep `MAX_REQUEST_BODY_BYTES` enabled to reject oversized payload attacks early.
 - Keep `ARCHIVE_ENDPOINT_SECRET` and `EXPORT_ENDPOINT_SECRET` enabled.
+- Set `ARCHIVE_ON_INGEST=true` when S3 or Vercel Blob is available so full bodies do not accumulate in Postgres.
+- Set `RETENTION_DAYS` to a finite value so metadata rows are cleaned up automatically.
 
 Retention:
 - `RETENTION_DAYS` - auto-delete records older than this many days (`0` = keep forever)
@@ -140,7 +145,7 @@ See `.env.example` for full template.
 
 ## Data Retention
 
-When `RETENTION_DAYS` is set to a positive value, the `cleanup_old_records()` function in `app/db.py` can be called to delete records older than the configured number of days from `raw_http_records` and `anon_usage_traces`. This can be wired up as a cron job or called during application startup.
+When `RETENTION_DAYS` is set to a positive value, the `/internal/archive/run` maintenance path also runs `cleanup_old_records()` after each archival batch. This lets the same Vercel cron both drain unarchived rows and prune old metadata. The helper can still be called directly from `app/db.py` if you need an external job.
 
 Example cleanup cron (external):
 ```bash
@@ -191,6 +196,10 @@ curl -H "X-Chutes-Export-Secret: $EXPORT_ENDPOINT_SECRET" \
   "http://localhost:8000/internal/export/raw-http.jsonl?limit=100"
 ```
 
+The internal endpoint and manual exporter stream rows incrementally from Postgres
+and object storage, so bounded exports do not need to materialize the full
+result set in memory before bytes start flowing to the caller.
+
 Manual script from a trusted shell:
 
 ```bash
@@ -213,10 +222,10 @@ Run one small archival batch manually:
 ```bash
 curl -X POST \
   -H "X-Chutes-Archive-Secret: $ARCHIVE_ENDPOINT_SECRET" \
-  "http://localhost:8000/internal/archive/run?limit=100"
+  "http://localhost:8000/internal/archive/run?limit=500"
 ```
 
-Production can run this via Vercel Cron every few minutes. Archive endpoint also accepts
+Production can run this via Vercel Cron every minute. Archive endpoint also accepts
 `Authorization: Bearer <ARCHIVE_ENDPOINT_SECRET>` for cron-compatible auth.
 
 Optional date window:
@@ -270,7 +279,7 @@ Then set environment variables in Vercel project settings (or with CLI) before f
 - Do not commit secrets (`DATABASE_URL`, salts, API keys). The `.gitignore` already excludes `.env.*` files.
 - `ANONYMIZATION_HASH_SALT` must be a real secret. The app will refuse to start with placeholder values.
 - Authorization headers and API keys are automatically redacted in raw HTTP recordings before storage.
-- Internal managed headers (`X-Chutes-Research-OptIn`, `X-Chutes-Trace`, `X-Chutes-Correlation-Id`) are stripped from stored header maps.
+- Internal managed headers (`X-Chutes-Research-OptIn`, `X-Chutes-Trace`, `X-Chutes-Correlation-Id`, `X-Chutes-RealIP`) are stripped from stored header maps.
 - Hop-by-hop headers (connection, transfer-encoding, upgrade, etc.) are stripped from both forwarded requests and responses.
 - Configure `RATE_LIMIT_REQUESTS` in production to prevent abuse.
 - Set `RETENTION_DAYS` and run periodic cleanup to manage storage growth.

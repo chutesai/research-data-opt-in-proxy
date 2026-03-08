@@ -14,8 +14,8 @@
   ],
   "crons": [
     {
-      "path": "/internal/archive/run?limit=100",
-      "schedule": "*/10 * * * *"
+      "path": "/internal/archive/run?limit=500",
+      "schedule": "*/1 * * * *"
     }
   ]
 }

@@ -318,7 +318,7 @@ class TraceSSEUnwrapper:
 
         if "trace" in payload:
             self._saw_wrapped = True
-            return b""
+            return b": trace\n\n"
 
         if "result" in payload:
             self._saw_wrapped = True

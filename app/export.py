@@ -5,7 +5,8 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
+from uuid import UUID
 
 import asyncpg
 import orjson
@@ -13,7 +14,7 @@ import orjson
 from app.object_storage import ObjectStorage
 
 
-RAW_EXPORT_QUERY = """\
+RAW_EXPORT_BATCH_QUERY = """\
 SELECT
     request_id,
     correlation_id,
@@ -44,42 +45,15 @@ SELECT
     chutes_trace,
     error
 FROM raw_http_records
-ORDER BY created_at ASC
-"""
-
-RAW_EXPORT_QUERY_WITH_DATE_RANGE = """\
-SELECT
-    request_id,
-    correlation_id,
-    created_at,
-    method,
-    path,
-    query_string,
-    upstream_url,
-    request_headers,
-    request_body,
-    request_body_size_bytes,
-    request_body_sha256,
-    request_blob_key,
-    request_blob_url,
-    response_status,
-    response_headers,
-    response_body,
-    response_body_size_bytes,
-    response_body_sha256,
-    response_blob_key,
-    response_blob_url,
-    archived_at,
-    archive_error,
-    duration_ms,
-    client_ip,
-    is_stream,
-    upstream_invocation_id,
-    chutes_trace,
-    error
-FROM raw_http_records
-WHERE created_at >= $1 AND created_at < $2
-ORDER BY created_at ASC
+WHERE ($1::timestamptz IS NULL OR created_at >= $1)
+  AND ($2::timestamptz IS NULL OR created_at < $2)
+  AND (
+        $3::timestamptz IS NULL
+        OR created_at > $3
+        OR (created_at = $3 AND request_id > $4::uuid)
+      )
+ORDER BY created_at ASC, request_id ASC
+LIMIT $5
 """
 
 
@@ -152,27 +126,61 @@ async def export_raw_http_jsonl(
     resolve_archived_bodies: bool = False,
 ) -> list[bytes]:
     """Export raw HTTP records to JSONL rows."""
-    query = RAW_EXPORT_QUERY
-    args: list[Any] = []
-    if start_time and end_time:
-        query = RAW_EXPORT_QUERY_WITH_DATE_RANGE
-        args.extend([start_time, end_time])
-    if limit is not None and limit > 0:
-        query += f"\nLIMIT {int(limit)}"
+    lines: list[bytes] = []
+    async for line in iter_raw_http_jsonl(
+        pool,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        object_storage=object_storage,
+        resolve_archived_bodies=resolve_archived_bodies,
+    ):
+        lines.append(line)
+    return lines
+
+
+async def iter_raw_http_jsonl(
+    pool: asyncpg.Pool,
+    *,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    limit: int | None = None,
+    object_storage: ObjectStorage | None = None,
+    resolve_archived_bodies: bool = False,
+) -> AsyncIterator[bytes]:
+    remaining = limit if limit and limit > 0 else None
+    cursor_created_at: datetime | None = None
+    cursor_request_id: UUID | None = None
 
     async with pool.acquire() as conn:
-        rows = await conn.fetch(query, *args)
-
-    lines: list[bytes] = []
-    for row in rows:
-        lines.append(
-            await raw_row_to_jsonl(
-                row,
-                object_storage=object_storage,
-                resolve_archived_bodies=resolve_archived_bodies,
+        while True:
+            batch_size = min(100, remaining) if remaining is not None else 100
+            rows = await conn.fetch(
+                RAW_EXPORT_BATCH_QUERY,
+                start_time,
+                end_time,
+                cursor_created_at,
+                cursor_request_id,
+                batch_size,
             )
-        )
-    return lines
+            if not rows:
+                break
+
+            for row in rows:
+                yield await raw_row_to_jsonl(
+                    row,
+                    object_storage=object_storage,
+                    resolve_archived_bodies=resolve_archived_bodies,
+                )
+
+            last_row = rows[-1]
+            cursor_created_at = last_row["created_at"]
+            cursor_request_id = last_row["request_id"]
+
+            if remaining is not None:
+                remaining -= len(rows)
+                if remaining <= 0:
+                    break
 
 
 async def export_raw_http_to_file(
@@ -186,21 +194,22 @@ async def export_raw_http_to_file(
     resolve_archived_bodies: bool = False,
 ) -> int:
     """Write raw HTTP records to a JSONL file and return row count."""
-    lines = await export_raw_http_jsonl(
-        pool,
-        start_time=start_time,
-        end_time=end_time,
-        limit=limit,
-        object_storage=object_storage,
-        resolve_archived_bodies=resolve_archived_bodies,
-    )
+    row_count = 0
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as f:
-        for line in lines:
+        async for line in iter_raw_http_jsonl(
+            pool,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            object_storage=object_storage,
+            resolve_archived_bodies=resolve_archived_bodies,
+        ):
             f.write(line)
             f.write(b"\n")
-    return len(lines)
+            row_count += 1
+    return row_count
 
 
 def _to_iso(value: Any) -> str | None:

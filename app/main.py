@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import logging
 
 import asyncpg
 import httpx
@@ -17,6 +19,42 @@ from app.rate_limit import RateLimitMiddleware
 from app.recorder import NoopRecorder, PostgresRecorder
 
 
+def _configure_runtime_logging() -> None:
+    # Avoid per-request upstream client logs on Vercel; they add noise and
+    # unnecessary work on the proxy hot path.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+def _create_http_client(
+    *,
+    settings: Settings,
+    upstream_transport: httpx.AsyncBaseTransport | None = None,
+) -> httpx.AsyncClient:
+    timeout = httpx.Timeout(
+        connect=settings.http_connect_timeout_seconds,
+        read=settings.http_read_timeout_seconds,
+        write=settings.http_write_timeout_seconds,
+        pool=settings.http_pool_timeout_seconds,
+    )
+    client_kwargs: dict[str, object] = {
+        "timeout": timeout,
+        "follow_redirects": False,
+    }
+
+    if upstream_transport is not None:
+        client_kwargs["transport"] = upstream_transport
+    else:
+        client_kwargs["http2"] = True
+        client_kwargs["limits"] = httpx.Limits(
+            max_connections=200,
+            max_keepalive_connections=100,
+            keepalive_expiry=30.0,
+        )
+
+    return httpx.AsyncClient(**client_kwargs)
+
+
 @dataclass(slots=True)
 class AppContainer:
     settings: Settings
@@ -24,6 +62,7 @@ class AppContainer:
     recorder: object
     db_pool: asyncpg.Pool | None
     object_storage: ObjectStorage | None
+    pending_tasks: set[asyncio.Task]
 
 
 def create_app(
@@ -33,26 +72,26 @@ def create_app(
     recorder_override: object | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
+    _configure_runtime_logging()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         pool = None
         object_storage = None
-        timeout = httpx.Timeout(
-            connect=resolved_settings.http_connect_timeout_seconds,
-            read=resolved_settings.http_read_timeout_seconds,
-            write=resolved_settings.http_write_timeout_seconds,
-            pool=resolved_settings.http_pool_timeout_seconds,
-        )
-        http_client = httpx.AsyncClient(
-            timeout=timeout,
-            follow_redirects=False,
-            transport=upstream_transport,
+        http_client = _create_http_client(
+            settings=resolved_settings,
+            upstream_transport=upstream_transport,
         )
 
         if resolved_settings.database_url:
             pool = await create_pool(resolved_settings.database_url)
             await init_schema(pool)
+
+        if resolved_settings.database_url:
+            try:
+                object_storage = create_object_storage(resolved_settings)
+            except Exception:
+                object_storage = None
 
         if recorder_override is not None:
             recorder = recorder_override
@@ -62,15 +101,13 @@ def create_app(
         ):
             if pool is None:
                 raise RuntimeError("DATABASE_URL is required when recording is enabled")
-            recorder = PostgresRecorder(pool=pool, settings=resolved_settings)
+            recorder = PostgresRecorder(
+                pool=pool,
+                settings=resolved_settings,
+                object_storage=object_storage,
+            )
         else:
             recorder = NoopRecorder()
-
-        if resolved_settings.database_url:
-            try:
-                object_storage = create_object_storage(resolved_settings)
-            except Exception:
-                object_storage = None
 
         app.state.container = AppContainer(
             settings=resolved_settings,
@@ -78,11 +115,15 @@ def create_app(
             recorder=recorder,
             db_pool=pool,
             object_storage=object_storage,
+            pending_tasks=set(),
         )
 
         try:
             yield
         finally:
+            pending_tasks = tuple(app.state.container.pending_tasks)
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
             await http_client.aclose()
             if pool is not None:
                 await pool.close()

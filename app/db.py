@@ -116,8 +116,8 @@ CREATE INDEX IF NOT EXISTS anon_usage_traces_chat_id_idx ON anon_usage_traces (c
 async def create_pool(database_url: str) -> asyncpg.Pool:
     return await asyncpg.create_pool(
         dsn=database_url,
-        min_size=1,
-        max_size=10,
+        min_size=0,
+        max_size=4,
         command_timeout=60,
     )
 

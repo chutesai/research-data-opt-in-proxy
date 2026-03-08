@@ -28,11 +28,14 @@ def test_build_forward_headers_strips_hop_by_hop():
                 (b"content-length", b"123"),
                 (b"x-chutes-trace", b"false"),
                 (b"x-chutes-correlation-id", b"user-supplied"),
+                (b"x-chutes-realip", b"spoofed"),
             ]
 
     result = _build_forward_headers(
         FakeRequest(),
-        managed_headers=frozenset({"x-chutes-trace", "x-chutes-correlation-id"}),
+        managed_headers=frozenset(
+            {"x-chutes-trace", "x-chutes-correlation-id", "x-chutes-realip"}
+        ),
     )
     keys = {k.lower() for k, _ in result}
 
@@ -45,6 +48,7 @@ def test_build_forward_headers_strips_hop_by_hop():
     assert "content-length" not in keys
     assert "x-chutes-trace" not in keys
     assert "x-chutes-correlation-id" not in keys
+    assert "x-chutes-realip" not in keys
 
 
 @pytest.mark.unit

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from unittest.mock import patch
 
 from app.config import Settings
 
@@ -45,6 +46,25 @@ def test_salt_accepts_real_value():
 
 
 @pytest.mark.unit
+def test_qwen_trace_recording_disabled_by_default():
+    s = Settings()
+    assert s.enable_qwen_trace_recording is False
+
+
+@pytest.mark.unit
+def test_environment_defaults_from_vercel_target_env():
+    with patch.dict("os.environ", {"VERCEL_TARGET_ENV": "production"}, clear=False):
+        s = Settings()
+    assert s.environment == "production"
+
+
+@pytest.mark.unit
+def test_bool_settings_strip_whitespace():
+    s = Settings(archive_on_ingest="true\n")
+    assert s.archive_on_ingest is True
+
+
+@pytest.mark.unit
 def test_stripped_header_set_parsed():
     s = Settings(
         anonymization_hash_salt="a-real-secret-value-for-testing",
@@ -62,6 +82,7 @@ def test_stripped_header_set_includes_discount_header():
     assert "x-chutes-research-optin" in s.stripped_header_set
     assert "x-chutes-trace" in s.stripped_header_set
     assert "x-chutes-correlation-id" in s.stripped_header_set
+    assert "x-chutes-realip" in s.stripped_header_set
 
 
 @pytest.mark.unit
@@ -75,6 +96,7 @@ def test_managed_upstream_header_set_contains_proxy_headers():
             "x-chutes-research-optin",
             "x-chutes-trace",
             "x-chutes-correlation-id",
+            "x-chutes-realip",
         }
     )
 
