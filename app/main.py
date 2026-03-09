@@ -153,6 +153,7 @@ def create_app(
             RateLimitMiddleware,
             max_requests=resolved_settings.rate_limit_requests,
             window_seconds=resolved_settings.rate_limit_window_seconds,
+            max_tracked_clients=resolved_settings.rate_limit_max_tracked_clients,
         )
 
     app.include_router(create_internal_router())

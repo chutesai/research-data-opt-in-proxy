@@ -73,11 +73,13 @@ def test_numeric_settings_strip_whitespace():
     s = Settings(
         rate_limit_requests="12000\n",
         rate_limit_window_seconds="60\n",
+        rate_limit_max_tracked_clients="50000\n",
         retention_days="7\n",
         archive_batch_size="500\n",
     )
     assert s.rate_limit_requests == 12000
     assert s.rate_limit_window_seconds == 60
+    assert s.rate_limit_max_tracked_clients == 50000
     assert s.retention_days == 7
     assert s.archive_batch_size == 500
 

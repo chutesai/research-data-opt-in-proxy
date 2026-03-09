@@ -8,12 +8,17 @@ import httpx
 from app.rate_limit import RateLimitMiddleware
 
 
-def _make_app(max_requests: int, window_seconds: int = 60) -> FastAPI:
+def _make_app(
+    max_requests: int,
+    window_seconds: int = 60,
+    max_tracked_clients: int = 50000,
+) -> FastAPI:
     app = FastAPI()
     app.add_middleware(
         RateLimitMiddleware,
         max_requests=max_requests,
         window_seconds=window_seconds,
+        max_tracked_clients=max_tracked_clients,
     )
 
     @app.get("/test")
@@ -47,6 +52,9 @@ async def test_rate_limit_blocks_after_max():
         resp = await client.get("/test")
         assert resp.status_code == 429
         assert "rate_limit_exceeded" in resp.json()["error"]
+        assert resp.headers["ratelimit-limit"] == "3"
+        assert resp.headers["ratelimit-remaining"] == "0"
+        assert resp.headers["retry-after"] == "60"
 
 
 @pytest.mark.unit
@@ -63,6 +71,9 @@ async def test_rate_limit_allows_healthz():
 
         resp = await client.get("/test")
         assert resp.status_code == 429
+
+        resp = await client.options("/test")
+        assert resp.status_code in {200, 405}
 
         # healthz is always allowed
         resp = await client.get("/healthz")
@@ -112,6 +123,8 @@ async def test_rate_limit_prefers_platform_ip_headers():
             },
         )
         assert resp.status_code == 200
+        assert resp.headers["ratelimit-limit"] == "1"
+        assert resp.headers["ratelimit-remaining"] == "0"
 
         # Same real IP should be rate-limited even if x-forwarded-for changes.
         resp = await client.get(
@@ -122,6 +135,7 @@ async def test_rate_limit_prefers_platform_ip_headers():
             },
         )
         assert resp.status_code == 429
+        assert resp.headers["retry-after"] == "60"
 
         # Different real IP should be treated as a separate client key.
         resp = await client.get(
@@ -131,4 +145,22 @@ async def test_rate_limit_prefers_platform_ip_headers():
                 "x-forwarded-for": "198.51.100.9",
             },
         )
+        assert resp.status_code == 200
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_rate_limit_evicts_old_client_keys_when_capacity_exceeded():
+    app = _make_app(max_requests=1, max_tracked_clients=2)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        for ip in ("203.0.113.1", "203.0.113.2", "203.0.113.3"):
+            resp = await client.get("/test", headers={"x-real-ip": ip})
+            assert resp.status_code == 200
+
+        # Oldest client state should have been evicted when IP3 arrived.
+        resp = await client.get("/test", headers={"x-real-ip": "203.0.113.1"})
         assert resp.status_code == 200

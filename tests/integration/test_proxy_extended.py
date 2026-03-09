@@ -220,6 +220,55 @@ async def test_request_body_too_large():
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_rate_limit_headers_exposed_on_proxy_responses():
+    settings = Settings(
+        database_url="",
+        enable_raw_http_recording=False,
+        enable_qwen_trace_recording=False,
+        anonymization_hash_salt="rate-limit-header-test-salt-long-enough",
+        upstream_base_url="https://upstream.test",
+        rate_limit_requests=1,
+        rate_limit_window_seconds=60,
+        rate_limit_max_tracked_clients=10,
+    )
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b'{"choices":[{"message":{"content":"ok"}}]}',
+        )
+    )
+    app = create_app(settings, upstream_transport=transport)
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            ok = await client.post(
+                "/v1/chat/completions",
+                headers={"x-real-ip": "203.0.113.10"},
+                json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
+            )
+            limited = await client.post(
+                "/v1/chat/completions",
+                headers={"x-real-ip": "203.0.113.10"},
+                json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
+            )
+
+    assert ok.status_code == 200
+    assert ok.headers["ratelimit-limit"] == "1"
+    assert ok.headers["ratelimit-remaining"] == "0"
+    assert int(ok.headers["ratelimit-reset"]) >= 1
+    assert limited.status_code == 429
+    assert limited.headers["ratelimit-limit"] == "1"
+    assert limited.headers["ratelimit-remaining"] == "0"
+    assert int(limited.headers["retry-after"]) >= 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_auth_and_discount_headers_stripped_from_recording(
     settings_factory,
     db_truncate,

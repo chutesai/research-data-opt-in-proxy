@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     # Per-client-IP rate limit: max requests per window.
     rate_limit_requests: int = 0  # 0 = disabled
     rate_limit_window_seconds: int = 60
+    rate_limit_max_tracked_clients: int = 50000
 
     # Header names completely stripped from raw HTTP recording storage.
     stripped_header_names: str = (
@@ -105,6 +106,7 @@ class Settings(BaseSettings):
         "max_stream_buffer_bytes",
         "rate_limit_requests",
         "rate_limit_window_seconds",
+        "rate_limit_max_tracked_clients",
         "retention_days",
         "archive_batch_size",
         mode="before",

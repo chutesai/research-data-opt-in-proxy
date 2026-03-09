@@ -128,9 +128,11 @@ Limits:
 - `MAX_STREAM_BUFFER_BYTES` - cap SSE recording buffer (default 50 MiB, `0` = unlimited)
 - `RATE_LIMIT_REQUESTS` - max requests per IP per window (`0` = disabled)
 - `RATE_LIMIT_WINDOW_SECONDS` - rate limit window (default `60`)
+- `RATE_LIMIT_MAX_TRACKED_CLIENTS` - cap in-memory rate-limit client buckets to avoid unbounded growth under many-source floods
 
 Recommended production baseline:
 - Set `RATE_LIMIT_REQUESTS` to a non-zero value sized above your expected per-IP burst rate.
+- Rate-limited responses include `RateLimit-*`, `X-RateLimit-*`, and `Retry-After` headers so callers can back off cleanly.
 - Keep `MAX_REQUEST_BODY_BYTES` enabled to reject oversized payload attacks early.
 - Keep `ARCHIVE_ENDPOINT_SECRET` and `EXPORT_ENDPOINT_SECRET` enabled.
 - Set `ARCHIVE_ON_INGEST=true` when S3 or Vercel Blob is available so full bodies do not accumulate in Postgres.
@@ -284,5 +286,6 @@ Then set environment variables in Vercel project settings (or with CLI) before f
 - Hop-by-hop headers (connection, transfer-encoding, upgrade, etc.) are stripped from both forwarded requests and responses.
 - Proxy-managed `X-Chutes-*` headers are not relayed back to downstream clients.
 - Configure `RATE_LIMIT_REQUESTS` in production to prevent abuse.
+- `OPTIONS` requests and internal maintenance routes are exempt from the in-memory limiter so CORS preflights and cron/archive flows are not throttled accidentally.
 - Set `RETENTION_DAYS` and run periodic cleanup to manage storage growth.
 - For the research endpoint, publish clear user messaging that usage is opt-in and recorded.
