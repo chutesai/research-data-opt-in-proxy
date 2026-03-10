@@ -4,6 +4,7 @@ import pytest
 import httpx
 
 from app.proxy import _build_forward_headers, _filter_response_headers, _headers_to_multimap
+from app.client_ip import extract_client_ip
 
 
 class _FakeHeaders:
@@ -119,3 +120,27 @@ def test_filter_response_headers_strips_x_chutes_prefixes():
     assert "x-other" in {key.lower() for key in result}
     assert "x-chutes-invocationid" not in {key.lower() for key in result}
     assert "x-chutes-correlation-id" not in {key.lower() for key in result}
+
+
+@pytest.mark.unit
+def test_extract_client_ip_prefers_vercel_managed_forwarded_for():
+    class FakeRequest:
+        headers = httpx.Headers(
+            {
+                "x-real-ip": "203.0.113.10",
+                "x-vercel-forwarded-for": "198.51.100.8",
+                "x-forwarded-for": "198.51.100.9, 10.0.0.1",
+            }
+        )
+        client = type("Client", (), {"host": "127.0.0.1"})()
+
+    assert extract_client_ip(FakeRequest()) == "198.51.100.9"
+
+
+@pytest.mark.unit
+def test_extract_client_ip_falls_back_to_socket_peer_when_no_trusted_forwarded_header():
+    class FakeRequest:
+        headers = httpx.Headers({"x-real-ip": "203.0.113.10"})
+        client = type("Client", (), {"host": "127.0.0.1"})()
+
+    assert extract_client_ip(FakeRequest()) == "127.0.0.1"

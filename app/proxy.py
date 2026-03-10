@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app.anonymizer import build_usage_trace_candidate, parse_json_bytes
+from app.client_ip import extract_client_ip
 from app.chutes_trace import (
     TraceSSEUnwrapper,
     extract_chutes_trace_metadata,
@@ -93,7 +94,7 @@ def create_proxy_router() -> APIRouter:
             )
 
         request_payload = parse_json_bytes(body)
-        client_ip = _extract_client_ip(request)
+        client_ip = extract_client_ip(request)
 
         query_string = request.url.query or ""
         path_segment = full_path.lstrip("/")
@@ -437,22 +438,6 @@ def _headers_to_multimap(
             continue
         output.setdefault(key_lower, []).append(value)
     return output
-
-
-def _extract_client_ip(request: Request) -> str | None:
-    for header_name in (
-        "x-real-ip",
-        "x-vercel-forwarded-for",
-        "x-forwarded-for",
-    ):
-        header_value = request.headers.get(header_name)
-        if header_value:
-            return header_value.split(",")[0].strip()
-    if request.client:
-        return request.client.host
-    return None
-
-
 def _duration_ms(started_at: datetime, completed_at: datetime) -> int:
     return max(0, int((completed_at - started_at).total_seconds() * 1000))
 

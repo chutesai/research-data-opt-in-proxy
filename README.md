@@ -304,6 +304,7 @@ Operational note:
 - Internal managed headers and upstream `X-Chutes-*` response headers are stripped from stored header maps.
 - Hop-by-hop headers (connection, transfer-encoding, upgrade, etc.) are stripped from both forwarded requests and responses.
 - Proxy-managed `X-Chutes-*` headers are not relayed back to downstream clients.
+- Client IP attribution trusts Vercel-managed `x-forwarded-for` headers and falls back to the socket peer. Caller-supplied `x-real-ip` is ignored.
 - Configure `RATE_LIMIT_REQUESTS` in production to prevent abuse.
 - `OPTIONS` requests and internal maintenance routes are exempt from the in-memory limiter so CORS preflights and cron/archive flows are not throttled accidentally.
 - Set `RETENTION_DAYS` and run periodic cleanup to manage storage growth.

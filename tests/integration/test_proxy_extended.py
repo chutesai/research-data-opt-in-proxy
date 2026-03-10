@@ -248,12 +248,12 @@ async def test_rate_limit_headers_exposed_on_proxy_responses():
         ) as client:
             ok = await client.post(
                 "/v1/chat/completions",
-                headers={"x-real-ip": "203.0.113.10"},
+                headers={"x-forwarded-for": "203.0.113.10"},
                 json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
             )
             limited = await client.post(
                 "/v1/chat/completions",
-                headers={"x-real-ip": "203.0.113.10"},
+                headers={"x-forwarded-for": "203.0.113.10"},
                 json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
             )
 

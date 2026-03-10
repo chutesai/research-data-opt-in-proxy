@@ -10,6 +10,8 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
+from app.client_ip import extract_client_ip
+
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """In-memory per-IP sliding window rate limiter with bounded state."""
@@ -45,7 +47,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         }:
             return await call_next(request)
 
-        client_ip = _get_client_ip(request)
+        client_ip = extract_client_ip(request) or "unknown"
         now = time.monotonic()
         window_start = now - self.window_seconds
 
@@ -173,17 +175,3 @@ def _apply_rate_limit_headers(
 
 def _seconds_until(target_time: float, now: float) -> int:
     return max(1, math.ceil(target_time - now))
-
-
-def _get_client_ip(request: Request) -> str:
-    for header_name in (
-        "x-real-ip",
-        "x-vercel-forwarded-for",
-        "x-forwarded-for",
-    ):
-        header_value = request.headers.get(header_name)
-        if header_value:
-            return header_value.split(",")[0].strip()
-    if request.client:
-        return request.client.host
-    return "unknown"

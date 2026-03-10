@@ -118,7 +118,6 @@ async def test_rate_limit_prefers_platform_ip_headers():
         resp = await client.get(
             "/test",
             headers={
-                "x-real-ip": "203.0.113.1",
                 "x-forwarded-for": "198.51.100.9",
             },
         )
@@ -126,18 +125,16 @@ async def test_rate_limit_prefers_platform_ip_headers():
         assert resp.headers["ratelimit-limit"] == "1"
         assert resp.headers["ratelimit-remaining"] == "0"
 
-        # Same real IP should be rate-limited even if x-forwarded-for changes.
+        # Different forwarded IP should be treated as a separate client key.
         resp = await client.get(
             "/test",
             headers={
-                "x-real-ip": "203.0.113.1",
                 "x-forwarded-for": "198.51.100.8",
             },
         )
-        assert resp.status_code == 429
-        assert resp.headers["retry-after"] == "60"
+        assert resp.status_code == 200
 
-        # Different real IP should be treated as a separate client key.
+        # Same forwarded IP should now be rate-limited even if x-real-ip changes.
         resp = await client.get(
             "/test",
             headers={
@@ -145,7 +142,8 @@ async def test_rate_limit_prefers_platform_ip_headers():
                 "x-forwarded-for": "198.51.100.9",
             },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 429
+        assert resp.headers["retry-after"] == "60"
 
 
 @pytest.mark.unit
@@ -158,9 +156,9 @@ async def test_rate_limit_evicts_old_client_keys_when_capacity_exceeded():
         base_url="http://test",
     ) as client:
         for ip in ("203.0.113.1", "203.0.113.2", "203.0.113.3"):
-            resp = await client.get("/test", headers={"x-real-ip": ip})
+            resp = await client.get("/test", headers={"x-forwarded-for": ip})
             assert resp.status_code == 200
 
         # Oldest client state should have been evicted when IP3 arrived.
-        resp = await client.get("/test", headers={"x-real-ip": "203.0.113.1"})
+        resp = await client.get("/test", headers={"x-forwarded-for": "203.0.113.1"})
         assert resp.status_code == 200
