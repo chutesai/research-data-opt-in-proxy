@@ -255,7 +255,7 @@ export TEST_DATABASE_URL=postgresql://user:password@host/test_database?sslmode=r
 pytest tests/integration -m integration
 ```
 
-`TEST_DATABASE_URL` must point to a dedicated disposable test database. The DB-backed tests truncate tables and intentionally ignore `DATABASE_URL`.
+`TEST_DATABASE_URL` must point to a dedicated disposable test database. The DB-backed tests truncate tables, intentionally ignore `DATABASE_URL` by default, and now refuse to run if `TEST_DATABASE_URL` resolves to the same database target as `DATABASE_URL`.
 
 ### E2E (live `llm.chutes.ai`)
 

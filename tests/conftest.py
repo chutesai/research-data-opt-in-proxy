@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Awaitable, Callable
+from urllib.parse import urlsplit
 
 import asyncpg
 import pytest
@@ -17,13 +18,21 @@ def database_url() -> str | None:
 
 @pytest.fixture
 def require_database(database_url: str | None) -> str:
+    runtime_database_url = os.getenv("DATABASE_URL")
+
     if not database_url:
-        if os.getenv("DATABASE_URL"):
+        if runtime_database_url:
             pytest.skip(
                 "TEST_DATABASE_URL is required for destructive DB-backed tests; "
                 "DATABASE_URL is intentionally ignored"
             )
         pytest.skip("TEST_DATABASE_URL is required for this test")
+
+    if runtime_database_url and _same_database_target(database_url, runtime_database_url):
+        pytest.skip(
+            "TEST_DATABASE_URL resolves to the same database target as DATABASE_URL; "
+            "destructive DB-backed tests are blocked to protect recorded data"
+        )
     return database_url
 
 
@@ -122,3 +131,27 @@ async def _connect_with_retry(database_url: str, attempts: int = 3) -> asyncpg.C
             await asyncio.sleep(0.6 * attempt)
     assert last_error is not None
     raise last_error
+
+
+def _same_database_target(left: str, right: str) -> bool:
+    left_parts = _database_target_parts(left)
+    right_parts = _database_target_parts(right)
+    return bool(left_parts and right_parts and left_parts == right_parts)
+
+
+def _database_target_parts(url: str) -> tuple[str, str | None, int | None, str] | None:
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"postgres", "postgresql"}:
+        return None
+
+    hostname = parsed.hostname.lower() if parsed.hostname else None
+    database_name = parsed.path.lstrip("/").strip()
+    if not hostname or not database_name:
+        return None
+
+    return (
+        parsed.scheme,
+        hostname,
+        parsed.port,
+        database_name,
+    )
