@@ -96,6 +96,11 @@ def create_internal_router() -> APIRouter:
                 status_code=500,
                 content={"error": "db_not_configured"},
             )
+        if resolve_archived_bodies and container.object_storage is None:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "object_storage_not_configured"},
+            )
 
         start_dt = _parse_iso(start) if start else None
         end_dt = _parse_iso(end) if end else None

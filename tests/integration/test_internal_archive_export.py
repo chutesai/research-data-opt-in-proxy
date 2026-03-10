@@ -213,3 +213,35 @@ async def test_inline_archive_on_ingest_stores_bodies_in_object_storage(
     assert row["response_blob_key"] is not None
     assert row["response_blob_url"].startswith("mem://")
     assert row["archived_at"] is not None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_export_resolve_archived_bodies_requires_object_storage(
+    settings_factory,
+    db_truncate,
+):
+    await db_truncate()
+
+    settings = settings_factory(
+        export_endpoint_secret="export-secret-test",
+        enable_qwen_trace_recording=False,
+        archive_storage_provider="auto",
+        archive_s3_bucket="",
+        vercel_blob_read_write_token="",
+    )
+
+    app = create_app(settings, upstream_transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get(
+                "/internal/export/raw-http.jsonl?resolve_archived_bodies=true&limit=1",
+                headers={"X-Chutes-Export-Secret": "export-secret-test"},
+            )
+
+    assert resp.status_code == 500
+    assert resp.json() == {"error": "object_storage_not_configured"}

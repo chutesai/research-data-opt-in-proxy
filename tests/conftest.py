@@ -12,13 +12,18 @@ from app.config import Settings
 
 @pytest.fixture(scope="session")
 def database_url() -> str | None:
-    return os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL")
+    return os.getenv("TEST_DATABASE_URL")
 
 
 @pytest.fixture
 def require_database(database_url: str | None) -> str:
     if not database_url:
-        pytest.skip("TEST_DATABASE_URL or DATABASE_URL is required for this test")
+        if os.getenv("DATABASE_URL"):
+            pytest.skip(
+                "TEST_DATABASE_URL is required for destructive DB-backed tests; "
+                "DATABASE_URL is intentionally ignored"
+            )
+        pytest.skip("TEST_DATABASE_URL is required for this test")
     return database_url
 
 

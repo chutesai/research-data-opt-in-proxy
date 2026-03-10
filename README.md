@@ -251,15 +251,17 @@ pytest tests/unit -m unit
 ### Integration (proxy + recorder + Postgres)
 
 ```bash
-export TEST_DATABASE_URL="$DATABASE_URL"
+export TEST_DATABASE_URL=postgresql://user:password@host/test_database?sslmode=require
 pytest tests/integration -m integration
 ```
+
+`TEST_DATABASE_URL` must point to a dedicated disposable test database. The DB-backed tests truncate tables and intentionally ignore `DATABASE_URL`.
 
 ### E2E (live `llm.chutes.ai`)
 
 ```bash
 export CHUTES_API_KEY=...
-export TEST_DATABASE_URL="$DATABASE_URL"
+export TEST_DATABASE_URL=postgresql://user:password@host/test_database?sslmode=require
 pytest tests/e2e -m e2e -s
 ```
 
@@ -276,6 +278,23 @@ vercel --prod
 ```
 
 Then set environment variables in Vercel project settings (or with CLI) before final production traffic.
+
+### Custom Domain
+
+Current verified production hosts:
+- `https://research-data-opt-in-proxy.vercel.app`
+- `https://research-data-opt-in-proxy.chutes.ai`
+
+The `chutes.ai` binding follows the same Vercel-managed pattern used by other
+Chutes subdomains:
+- `CNAME research-data-opt-in-proxy -> <project-specific>.vercel-dns-016.com.`
+- `TXT _vercel -> vc-domain-verify=research-data-opt-in-proxy.chutes.ai,<token>`
+
+Operational note:
+- DNS can propagate before Vercel finishes certificate issuance. During that
+  window `dig` may already show the correct `vercel-dns-*` target while HTTPS
+  still fails with TLS handshake or certificate errors. Re-check `/health`
+  after a few minutes before assuming the app deployment is broken.
 
 ## Security Notes
 
