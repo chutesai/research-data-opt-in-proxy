@@ -392,3 +392,64 @@ async def test_non_stream_trace_envelope_is_unwrapped(
     assert "x-chutes-correlation-id" not in resp.headers
     assert "x-chutes-invocationid" not in resp.headers
     assert resp.json()["choices"][0]["message"]["content"] == "ok"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_non_stream_trace_envelope_with_error_payload_is_unwrapped_and_compacted(
+    settings_factory,
+    db_truncate,
+    db_fetch_one,
+):
+    await db_truncate()
+
+    wrapped_body = (
+        b'data: {"trace":{"invocation_id":"inv-1","message":"identified"}}\n\n'
+        b'data: {"error":"infra_overload","detail":"Infrastructure is at maximum capacity, try again later"}\n\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            headers={
+                "content-type": "text/event-stream",
+                "x-chutes-invocationid": "parent-env-2",
+            },
+            content=wrapped_body,
+        )
+
+    app = create_app(settings_factory(), upstream_transport=httpx.MockTransport(handler))
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer test"},
+                json={
+                    "model": "Qwen/Qwen2.5-7B-Instruct",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.json()["error"] == "infra_overload"
+
+    raw_row = await db_fetch_one(
+        """
+        SELECT response_json, response_body_format, stored_response_content_type,
+               octet_length(response_body) AS response_len
+        FROM raw_http_records
+        LIMIT 1
+        """
+    )
+    response_json = raw_row["response_json"]
+    if isinstance(response_json, str):
+        response_json = json.loads(response_json)
+    assert raw_row["response_body_format"] == "json"
+    assert raw_row["stored_response_content_type"] == "application/json"
+    assert raw_row["response_len"] == 0
+    assert response_json["error"] == "infra_overload"

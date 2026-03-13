@@ -134,3 +134,19 @@ def test_unwrap_chutes_non_stream_body_nested_result_wrapper():
     assert content_type == "application/json"
     payload = orjson.loads(unwrapped_body)
     assert payload["id"] == "nested"
+
+
+@pytest.mark.unit
+def test_unwrap_chutes_non_stream_body_direct_error_payload():
+    body = (
+        b'data: {"trace":{"invocation_id":"inv-1","message":"identified"}}\n\n'
+        b'data: {"error":"infra_overload","detail":"Infrastructure is at maximum capacity, try again later"}\n\n'
+    )
+
+    unwrapped = unwrap_chutes_non_stream_body(body)
+    assert unwrapped is not None
+    unwrapped_body, content_type = unwrapped
+    assert content_type == "application/json"
+    payload = orjson.loads(unwrapped_body)
+    assert payload["error"] == "infra_overload"
+    assert "maximum capacity" in payload["detail"]

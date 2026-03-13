@@ -158,6 +158,7 @@ def unwrap_chutes_non_stream_body(
         payload = non_trace_payloads[0]
         if unwrapped := _unwrap_envelope_dict(payload):
             return unwrapped
+        return orjson.dumps(payload), "application/json"
 
     result_chunks: list[bytes] = []
     for payload in non_trace_payloads:
