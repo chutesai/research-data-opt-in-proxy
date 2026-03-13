@@ -640,3 +640,113 @@ async def test_compact_json_endpoint_skips_unrecoverable_mem_rows(
         """
     )
     assert skipped_row_format == "bytes/bytes"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_compact_json_endpoint_marks_incomplete_stream_response_empty(
+    settings_factory,
+    db_truncate,
+    db_fetch_one,
+):
+    await db_truncate()
+
+    archive_secret = "archive-secret-test"
+    settings = settings_factory(
+        archive_endpoint_secret=archive_secret,
+        enable_qwen_trace_recording=False,
+        archive_storage_provider="auto",
+        archive_s3_bucket="",
+        vercel_blob_read_write_token="",
+    )
+
+    app = create_app(settings, upstream_transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+    incomplete_stream = (
+        b'data: {"trace":{"message":"identified 8 available targets"}}\n\n'
+        b'data: {"trace":{"message":"attempting target"}}\n\n'
+    )
+
+    async with app.router.lifespan_context(app):
+        await app.state.container.db_pool.execute(
+            """
+            INSERT INTO raw_http_records (
+                request_id,
+                correlation_id,
+                created_at,
+                method,
+                path,
+                query_string,
+                upstream_url,
+                request_headers,
+                request_body,
+                request_json,
+                request_body_format,
+                stored_request_content_type,
+                response_status,
+                response_headers,
+                response_body,
+                response_body_format,
+                stored_response_content_type,
+                duration_ms,
+                client_ip,
+                is_stream,
+                upstream_invocation_id,
+                chutes_trace,
+                error
+            ) VALUES (
+                '00000000-0000-0000-0000-000000000122'::uuid,
+                '00000000-0000-0000-0000-000000000222'::uuid,
+                NOW(),
+                'POST',
+                '/v1/chat/completions',
+                '',
+                'https://llm.chutes.ai/v1/chat/completions',
+                '{}'::jsonb,
+                ''::bytea,
+                '{"model":"m","messages":[{"role":"user","content":"hello"}]}'::jsonb,
+                'json',
+                'application/json',
+                200,
+                '{"content-type":["text/event-stream"]}'::jsonb,
+                $1::bytea,
+                'bytes',
+                'text/event-stream',
+                12,
+                '1.2.3.4',
+                true,
+                'inv-incomplete',
+                '{}'::jsonb,
+                NULL
+            )
+            """,
+            incomplete_stream,
+        )
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/internal/storage/compact-json?limit=10",
+                headers={"X-Chutes-Archive-Secret": archive_secret},
+            )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["migrated"] == 1
+
+    row = await db_fetch_one(
+        """
+        SELECT
+            request_body_format,
+            response_body_format,
+            request_json,
+            response_json
+        FROM raw_http_records
+        WHERE request_id = '00000000-0000-0000-0000-000000000122'::uuid
+        """
+    )
+    assert row["request_body_format"] == "json"
+    assert row["response_body_format"] == "empty"
+    assert row["request_json"] is not None
+    assert row["response_json"] is None

@@ -211,6 +211,16 @@ async def _migrate_request_id(
                     if normalized_response is not None:
                         response_json = normalized_response.json_payload
                         response_format = normalized_response.storage_format
+                    elif _looks_like_incomplete_stream(
+                        response_body=response_body,
+                        response_content_type=response_content_type,
+                    ):
+                        response_format = "empty"
+                        if request_json_exists or request_json is not None:
+                            if request_format == "bytes":
+                                request_format = "json"
+                        elif request_format == "bytes":
+                            request_format = "empty"
                     elif not response_body and row["response_blob_url"] is None:
                         response_format = "empty"
                 elif response_format == "bytes" and not response_body and row["response_blob_url"] is None:
@@ -373,3 +383,10 @@ def _first_header_value(headers, key: str) -> str | None:
         if isinstance(first, str):
             return first
     return None
+
+
+def _looks_like_incomplete_stream(*, response_body: bytes, response_content_type: str) -> bool:
+    lowered = response_content_type.lower()
+    if "text/event-stream" in lowered:
+        return True
+    return response_body.lstrip().startswith(b"data:")
