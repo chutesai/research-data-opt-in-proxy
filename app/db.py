@@ -88,6 +88,12 @@ CREATE INDEX IF NOT EXISTS raw_http_records_archived_at_idx ON raw_http_records 
 CREATE INDEX IF NOT EXISTS raw_http_records_unarchived_created_at_idx
     ON raw_http_records (created_at ASC)
     WHERE archived_at IS NULL;
+CREATE INDEX IF NOT EXISTS raw_http_records_compact_candidates_idx
+    ON raw_http_records (created_at ASC, request_id ASC)
+    WHERE request_body_format = 'bytes'
+       OR response_body_format = 'bytes'
+       OR (request_body_format = 'json' AND request_json IS NULL)
+       OR (response_body_format = 'json' AND response_json IS NULL);
 
 CREATE TABLE IF NOT EXISTS anon_trace_sessions (
     chat_id BIGSERIAL PRIMARY KEY,
