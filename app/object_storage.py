@@ -35,12 +35,22 @@ class S3ObjectStorage(ObjectStorage):
     def __init__(self, *, bucket: str, region: str):
         try:
             import boto3  # pylint: disable=import-outside-toplevel
+            from botocore.config import Config  # pylint: disable=import-outside-toplevel
         except ImportError as exc:  # pragma: no cover - dependency path
             raise ObjectStorageError("boto3 is required for S3 object storage") from exc
 
         self.bucket = bucket
         self.region = region
-        self.client = boto3.client("s3", region_name=region or None)
+        self.client = boto3.client(
+            "s3",
+            region_name=region or None,
+            config=Config(
+                connect_timeout=10,
+                read_timeout=60,
+                retries={"max_attempts": 2},
+                max_pool_connections=16,
+            ),
+        )
 
     async def put_bytes(self, *, key: str, payload: bytes, content_type: str) -> StoredObject:
         sha256 = hashlib.sha256(payload).hexdigest()
