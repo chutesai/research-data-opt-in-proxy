@@ -47,7 +47,9 @@ async def migrate_raw_http_records_to_compact_json(
                 created_at
             FROM raw_http_records
             WHERE (
-                    request_body_format = 'bytes'
+                    (request_json IS NULL AND request_blob_url IS NOT NULL)
+                 OR (response_json IS NULL AND response_blob_url IS NOT NULL)
+                 OR request_body_format = 'bytes'
                  OR response_body_format = 'bytes'
                  OR (request_body_format = 'json' AND request_json IS NULL)
                  OR (response_body_format = 'json' AND response_json IS NULL)

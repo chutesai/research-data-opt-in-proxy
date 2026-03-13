@@ -506,6 +506,127 @@ async def test_compact_json_endpoint_marks_empty_request_body(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_compact_json_endpoint_migrates_archived_error_response_payload(
+    settings_factory,
+    db_truncate,
+    db_fetch_one,
+):
+    await db_truncate()
+
+    archive_secret = "archive-secret-test"
+    settings = settings_factory(
+        archive_endpoint_secret=archive_secret,
+        enable_qwen_trace_recording=False,
+        archive_storage_provider="auto",
+        archive_s3_bucket="",
+        vercel_blob_read_write_token="",
+    )
+
+    archived_error_body = (
+        b'data: {"trace":{"invocation_id":"inv-error","message":"identified"}}\n\n'
+        b'data: {"error":"infra_overload","detail":"Infrastructure is at maximum capacity, try again later"}\n\n'
+    )
+
+    app = create_app(settings, upstream_transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+    fake_storage = _FakeObjectStorage()
+    fake_storage.store["archived/response.bin"] = _Stored(payload=archived_error_body)
+
+    async with app.router.lifespan_context(app):
+        app.state.container.object_storage = fake_storage
+
+        await app.state.container.db_pool.execute(
+            """
+            INSERT INTO raw_http_records (
+                request_id,
+                correlation_id,
+                created_at,
+                method,
+                path,
+                query_string,
+                upstream_url,
+                request_headers,
+                request_body,
+                request_json,
+                request_body_format,
+                response_status,
+                response_headers,
+                response_body,
+                response_body_format,
+                stored_response_content_type,
+                response_blob_key,
+                response_blob_url,
+                duration_ms,
+                client_ip,
+                is_stream,
+                upstream_invocation_id,
+                chutes_trace,
+                error
+            ) VALUES (
+                '00000000-0000-0000-0000-000000000119'::uuid,
+                '00000000-0000-0000-0000-000000000219'::uuid,
+                NOW(),
+                'POST',
+                '/v1/chat/completions',
+                '',
+                'https://llm.chutes.ai/v1/chat/completions',
+                '{}'::jsonb,
+                ''::bytea,
+                '{"model":"m","messages":[{"role":"user","content":"hello"}]}'::jsonb,
+                'json',
+                503,
+                '{"content-type":["text/event-stream"]}'::jsonb,
+                ''::bytea,
+                'empty',
+                'text/event-stream',
+                'archived/response.bin',
+                's3://bucket/raw-http-archive/archived/response.bin',
+                12,
+                '1.2.3.4',
+                false,
+                'inv-error',
+                '{}'::jsonb,
+                NULL
+            )
+            """
+        )
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/internal/storage/compact-json?limit=10",
+                headers={"X-Chutes-Archive-Secret": archive_secret},
+            )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["migrated"] == 1
+    assert payload["compacted"] == 1
+
+    row = await db_fetch_one(
+        """
+        SELECT
+            response_json,
+            response_body_format,
+            octet_length(response_body) AS response_len,
+            response_blob_url
+        FROM raw_http_records
+        WHERE request_id = '00000000-0000-0000-0000-000000000119'::uuid
+        """
+    )
+    response_json = row["response_json"]
+    if isinstance(response_json, str):
+        response_json = json.loads(response_json)
+    assert row["response_body_format"] == "json"
+    assert row["response_len"] == 0
+    assert row["response_blob_url"] == "s3://bucket/raw-http-archive/archived/response.bin"
+    assert response_json["error"] == "infra_overload"
+    assert "maximum capacity" in response_json["detail"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_compact_json_endpoint_skips_unrecoverable_mem_rows(
     settings_factory,
     db_truncate,
