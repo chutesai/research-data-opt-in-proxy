@@ -389,7 +389,12 @@ class _StreamingResponseAccumulator:
         self.done_seen = True
 
     def build(self) -> NormalizedStoredResponse | None:
-        if not self.done_seen or not self.saw_event:
+        if not self.saw_event:
+            return None
+        if not self.done_seen and not any(
+            choice.finish_reason is not None
+            for choice in self.choices.values()
+        ):
             return None
 
         created = self.created

@@ -68,6 +68,29 @@ def test_normalize_response_for_storage_reconstructs_completed_stream():
 
 
 @pytest.mark.unit
+def test_normalize_response_for_storage_reconstructs_stream_without_done_marker():
+    body = (
+        b'data: {"result":"data: {\\"id\\":\\"chatcmpl-3\\",\\"object\\":\\"chat.completion.chunk\\",\\"created\\":1740000001,\\"model\\":\\"test-model\\",\\"choices\\":[{\\"index\\":0,\\"delta\\":{\\"role\\":\\"assistant\\",\\"content\\":\\"Hel\\"}}]}\\n"}\n\n'
+        b'data: {"result":"\\n"}\n\n'
+        b'data: {"result":"data: {\\"id\\":\\"chatcmpl-3\\",\\"object\\":\\"chat.completion.chunk\\",\\"created\\":1740000001,\\"model\\":\\"test-model\\",\\"choices\\":[{\\"index\\":0,\\"delta\\":{\\"content\\":\\"lo\\"},\\"finish_reason\\":\\"stop\\"}],\\"usage\\":{\\"prompt_tokens\\":5,\\"completion_tokens\\":2}}\\n"}\n\n'
+    )
+
+    normalized = normalize_response_for_storage(
+        body,
+        "text/event-stream",
+        observed_at=datetime.now(timezone.utc),
+    )
+
+    assert normalized is not None
+    payload = normalized.json_payload
+    assert payload["object"] == "chat.completion"
+    assert payload["model"] == "test-model"
+    assert payload["choices"][0]["message"]["content"] == "Hello"
+    assert payload["choices"][0]["finish_reason"] == "stop"
+    assert payload["usage"]["completion_tokens"] == 2
+
+
+@pytest.mark.unit
 def test_normalize_response_for_storage_skips_incomplete_stream():
     body = (
         b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
