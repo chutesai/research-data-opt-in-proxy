@@ -12,22 +12,6 @@ from app.object_storage import create_object_storage
 from app.storage_migration import migrate_raw_http_records_to_compact_json
 
 
-async def _remaining_candidates(pool) -> int:
-    async with pool.acquire() as conn:
-        return int(
-            await conn.fetchval(
-                """
-                SELECT COUNT(*)
-                FROM raw_http_records
-                WHERE request_body_format = 'bytes'
-                   OR response_body_format = 'bytes'
-                   OR (request_body_format = 'json' AND request_json IS NULL)
-                   OR (response_body_format = 'json' AND response_json IS NULL)
-                """
-            )
-        )
-
-
 async def _run() -> int:
     parser = argparse.ArgumentParser(
         description="Backfill legacy raw_http_records rows into compact JSON storage.",
@@ -55,6 +39,12 @@ async def _run() -> int:
         default=0.0,
         help="Optional pause between batches.",
     )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=4,
+        help="How many candidate rows to process concurrently per batch.",
+    )
     args = parser.parse_args()
 
     if not args.database_url:
@@ -65,6 +55,8 @@ async def _run() -> int:
         raise SystemExit("--max-batches must be >= 0")
     if args.sleep_seconds < 0:
         raise SystemExit("--sleep-seconds must be >= 0")
+    if args.concurrency <= 0:
+        raise SystemExit("--concurrency must be > 0")
 
     settings = Settings(
         database_url=args.database_url,
@@ -73,7 +65,7 @@ async def _run() -> int:
     pool = await asyncpg.create_pool(
         dsn=args.database_url,
         min_size=0,
-        max_size=2,
+        max_size=max(2, args.concurrency + 1),
         command_timeout=600,
     )
     storage = create_object_storage(settings)
@@ -95,25 +87,23 @@ async def _run() -> int:
                 settings=settings,
                 limit=args.batch_size,
                 object_storage=storage,
+                concurrency=args.concurrency,
             )
             total_scanned += result.scanned
             total_migrated += result.migrated
             total_compacted += result.compacted
             total_skipped += result.skipped
-            remaining = await _remaining_candidates(pool)
 
             print(
                 "batch="
                 f"{batch_number} scanned={result.scanned} migrated={result.migrated} "
-                f"compacted={result.compacted} skipped={result.skipped} remaining={remaining}",
+                f"compacted={result.compacted} skipped={result.skipped}",
                 flush=True,
             )
 
             if result.scanned == 0:
                 break
             if result.migrated == 0 and result.skipped == result.scanned:
-                break
-            if remaining == 0:
                 break
             if args.sleep_seconds > 0:
                 await asyncio.sleep(args.sleep_seconds)

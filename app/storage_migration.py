@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import timezone
 
@@ -18,6 +19,12 @@ class CompactMigrationResult:
     compacted: int = 0
     skipped: int = 0
 
+    def add(self, other: "CompactMigrationResult") -> None:
+        self.scanned += other.scanned
+        self.migrated += other.migrated
+        self.compacted += other.compacted
+        self.skipped += other.skipped
+
 
 async def migrate_raw_http_records_to_compact_json(
     *,
@@ -25,10 +32,12 @@ async def migrate_raw_http_records_to_compact_json(
     settings: Settings,
     limit: int,
     object_storage: ObjectStorage | None = None,
+    concurrency: int = 1,
 ) -> CompactMigrationResult:
     if limit <= 0:
         return CompactMigrationResult()
 
+    concurrency = max(1, concurrency)
     result = CompactMigrationResult()
     async with pool.acquire() as conn:
         candidate_rows = await conn.fetch(
@@ -47,9 +56,47 @@ async def migrate_raw_http_records_to_compact_json(
             limit,
         )
 
+    if concurrency == 1:
         for candidate in candidate_rows:
-            result.scanned += 1
-            try:
+            result.add(await _migrate_request_id(
+                pool=pool,
+                settings=settings,
+                request_id=candidate["request_id"],
+                object_storage=object_storage,
+            ))
+        return result
+
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _run_candidate(request_id):
+        async with semaphore:
+            return await _migrate_request_id(
+                pool=pool,
+                settings=settings,
+                request_id=request_id,
+                object_storage=object_storage,
+            )
+
+    batch_results = await asyncio.gather(
+        *(_run_candidate(candidate["request_id"]) for candidate in candidate_rows)
+    )
+    for item in batch_results:
+        result.add(item)
+
+    return result
+
+
+async def _migrate_request_id(
+    *,
+    pool: asyncpg.Pool,
+    settings: Settings,
+    request_id,
+    object_storage: ObjectStorage | None,
+) -> CompactMigrationResult:
+    result = CompactMigrationResult(scanned=1)
+    try:
+        async with asyncio.timeout(120):
+            async with pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """
                     SELECT
@@ -76,11 +123,11 @@ async def migrate_raw_http_records_to_compact_json(
                     FROM raw_http_records
                     WHERE request_id = $1
                     """,
-                    candidate["request_id"],
+                    request_id,
                 )
                 if row is None:
-                    result.skipped += 1
-                    continue
+                    result.skipped = 1
+                    return result
 
                 request_body = bytes(row["request_body"])
                 response_body = bytes(row["response_body"])
@@ -122,9 +169,14 @@ async def migrate_raw_http_records_to_compact_json(
                 elif response_format == "bytes" and not response_body and row["response_blob_url"] is None:
                     response_format = "empty"
 
-                if request_json is None and response_json is None and request_format == "bytes" and response_format == "bytes":
-                    result.skipped += 1
-                    continue
+                if (
+                    request_json is None
+                    and response_json is None
+                    and request_format == "bytes"
+                    and response_format == "bytes"
+                ):
+                    result.skipped = 1
+                    return result
 
                 request_blob_key = row["request_blob_key"]
                 request_blob_url = row["request_blob_url"]
@@ -214,14 +266,12 @@ async def migrate_raw_http_records_to_compact_json(
                     b"",
                 )
 
-                result.migrated += 1
-                if compacted:
-                    result.compacted += 1
-            except Exception:
-                result.skipped += 1
-                continue
-
-    return result
+                result.migrated = 1
+                result.compacted = 1 if compacted else 0
+                return result
+    except Exception:
+        result.skipped = 1
+        return result
 
 
 async def _archive_body(
