@@ -67,132 +67,135 @@ async def migrate_raw_http_records_to_compact_json(
 
         for row in rows:
             result.scanned += 1
+            try:
+                request_body = bytes(row["request_body"])
+                response_body = bytes(row["response_body"])
+                request_json = row["request_json"]
+                response_json = row["response_json"]
+                request_format = row["request_body_format"] or "bytes"
+                response_format = row["response_body_format"] or "bytes"
 
-            request_body = bytes(row["request_body"])
-            response_body = bytes(row["response_body"])
-            request_json = row["request_json"]
-            response_json = row["response_json"]
-            request_format = row["request_body_format"] or "bytes"
-            response_format = row["response_body_format"] or "bytes"
+                if request_json is None:
+                    if not request_body and row["request_blob_url"] and object_storage is not None:
+                        request_body = await object_storage.get_bytes(
+                            key=row["request_blob_key"],
+                            url=row["request_blob_url"],
+                        )
+                    request_json, request_format = normalize_request_for_storage(request_body)
 
-            if request_json is None:
-                if not request_body and row["request_blob_url"] and object_storage is not None:
-                    request_body = await object_storage.get_bytes(
-                        key=row["request_blob_key"],
-                        url=row["request_blob_url"],
+                if response_json is None:
+                    if not response_body and row["response_blob_url"] and object_storage is not None:
+                        response_body = await object_storage.get_bytes(
+                            key=row["response_blob_key"],
+                            url=row["response_blob_url"],
+                        )
+                    response_headers = row["response_headers"]
+                    if isinstance(response_headers, str):
+                        response_headers = orjson.loads(response_headers)
+                    response_content_type = _first_header_value(response_headers, "content-type") or ""
+                    normalized_response = normalize_response_for_storage(
+                        response_body,
+                        response_content_type,
+                        observed_at=row["created_at"],
                     )
-                request_json, request_format = normalize_request_for_storage(request_body)
+                    if normalized_response is not None:
+                        response_json = normalized_response.json_payload
+                        response_format = normalized_response.storage_format
 
-            if response_json is None:
-                if not response_body and row["response_blob_url"] and object_storage is not None:
-                    response_body = await object_storage.get_bytes(
-                        key=row["response_blob_key"],
-                        url=row["response_blob_url"],
+                if request_json is None and response_json is None:
+                    result.skipped += 1
+                    continue
+
+                request_blob_key = row["request_blob_key"]
+                request_blob_url = row["request_blob_url"]
+                response_blob_key = row["response_blob_key"]
+                response_blob_url = row["response_blob_url"]
+                archived_at = row["archived_at"]
+                compacted = False
+
+                if request_json is not None and request_body and request_blob_url is None and object_storage is not None:
+                    request_blob_key, request_blob_url = await _archive_body(
+                        object_storage=object_storage,
+                        settings=settings,
+                        created_at=row["created_at"],
+                        request_id=str(row["request_id"]),
+                        suffix="request.bin",
+                        payload=request_body,
                     )
-                response_headers = row["response_headers"]
-                if isinstance(response_headers, str):
-                    response_headers = orjson.loads(response_headers)
-                response_content_type = _first_header_value(response_headers, "content-type") or ""
-                normalized_response = normalize_response_for_storage(
-                    response_body,
-                    response_content_type,
-                    observed_at=row["created_at"],
+                    compacted = True
+
+                if response_json is not None and response_body and response_blob_url is None and object_storage is not None:
+                    response_blob_key, response_blob_url = await _archive_body(
+                        object_storage=object_storage,
+                        settings=settings,
+                        created_at=row["created_at"],
+                        request_id=str(row["request_id"]),
+                        suffix="response.bin",
+                        payload=response_body,
+                    )
+                    compacted = True
+
+                clear_request_body = bool(
+                    request_json is not None and (request_blob_url is not None or not request_body)
                 )
-                if normalized_response is not None:
-                    response_json = normalized_response.json_payload
-                    response_format = normalized_response.storage_format
+                clear_response_body = bool(
+                    response_json is not None and (response_blob_url is not None or not response_body)
+                )
 
-            if request_json is None and response_json is None:
+                if clear_request_body or clear_response_body:
+                    compacted = True
+
+                await conn.execute(
+                    """
+                    UPDATE raw_http_records
+                    SET request_json = COALESCE($2::jsonb, request_json),
+                        request_body_format = CASE
+                            WHEN $3::text IS NULL THEN request_body_format
+                            ELSE $3
+                        END,
+                        stored_request_content_type = COALESCE($4, stored_request_content_type, 'application/json'),
+                        request_blob_key = COALESCE($5, request_blob_key),
+                        request_blob_url = COALESCE($6, request_blob_url),
+                        response_json = COALESCE($7::jsonb, response_json),
+                        response_body_format = CASE
+                            WHEN $8::text IS NULL THEN response_body_format
+                            ELSE $8
+                        END,
+                        stored_response_content_type = COALESCE($9, stored_response_content_type, 'application/json'),
+                        response_blob_key = COALESCE($10, response_blob_key),
+                        response_blob_url = COALESCE($11, response_blob_url),
+                        archived_at = CASE
+                            WHEN $12::timestamptz IS NOT NULL THEN COALESCE(archived_at, $12::timestamptz)
+                            ELSE archived_at
+                        END,
+                        request_body = CASE WHEN $13 THEN $14::bytea ELSE request_body END,
+                        response_body = CASE WHEN $15 THEN $16::bytea ELSE response_body END
+                    WHERE request_id = $1
+                    """,
+                    row["request_id"],
+                    orjson.dumps(request_json).decode("utf-8") if request_json is not None else None,
+                    request_format if request_json is not None else None,
+                    "application/json" if request_json is not None else None,
+                    request_blob_key,
+                    request_blob_url,
+                    orjson.dumps(response_json).decode("utf-8") if response_json is not None else None,
+                    response_format if response_json is not None else None,
+                    "application/json" if response_json is not None else None,
+                    response_blob_key,
+                    response_blob_url,
+                    archived_at if compacted else None,
+                    clear_request_body,
+                    b"",
+                    clear_response_body,
+                    b"",
+                )
+
+                result.migrated += 1
+                if compacted:
+                    result.compacted += 1
+            except Exception:
                 result.skipped += 1
                 continue
-
-            request_blob_key = row["request_blob_key"]
-            request_blob_url = row["request_blob_url"]
-            response_blob_key = row["response_blob_key"]
-            response_blob_url = row["response_blob_url"]
-            archived_at = row["archived_at"]
-            compacted = False
-
-            if request_json is not None and request_body and request_blob_url is None and object_storage is not None:
-                request_blob_key, request_blob_url = await _archive_body(
-                    object_storage=object_storage,
-                    settings=settings,
-                    created_at=row["created_at"],
-                    request_id=str(row["request_id"]),
-                    suffix="request.bin",
-                    payload=request_body,
-                )
-                compacted = True
-
-            if response_json is not None and response_body and response_blob_url is None and object_storage is not None:
-                response_blob_key, response_blob_url = await _archive_body(
-                    object_storage=object_storage,
-                    settings=settings,
-                    created_at=row["created_at"],
-                    request_id=str(row["request_id"]),
-                    suffix="response.bin",
-                    payload=response_body,
-                )
-                compacted = True
-
-            clear_request_body = bool(
-                request_json is not None and (request_blob_url is not None or not request_body)
-            )
-            clear_response_body = bool(
-                response_json is not None and (response_blob_url is not None or not response_body)
-            )
-
-            if clear_request_body or clear_response_body:
-                compacted = True
-
-            await conn.execute(
-                """
-                UPDATE raw_http_records
-                SET request_json = COALESCE($2::jsonb, request_json),
-                    request_body_format = CASE
-                        WHEN $3::text IS NULL THEN request_body_format
-                        ELSE $3
-                    END,
-                    stored_request_content_type = COALESCE($4, stored_request_content_type, 'application/json'),
-                    request_blob_key = COALESCE($5, request_blob_key),
-                    request_blob_url = COALESCE($6, request_blob_url),
-                    response_json = COALESCE($7::jsonb, response_json),
-                    response_body_format = CASE
-                        WHEN $8::text IS NULL THEN response_body_format
-                        ELSE $8
-                    END,
-                    stored_response_content_type = COALESCE($9, stored_response_content_type, 'application/json'),
-                    response_blob_key = COALESCE($10, response_blob_key),
-                    response_blob_url = COALESCE($11, response_blob_url),
-                    archived_at = CASE
-                        WHEN $12::timestamptz IS NOT NULL THEN COALESCE(archived_at, $12::timestamptz)
-                        ELSE archived_at
-                    END,
-                    request_body = CASE WHEN $13 THEN $14::bytea ELSE request_body END,
-                    response_body = CASE WHEN $15 THEN $16::bytea ELSE response_body END
-                WHERE request_id = $1
-                """,
-                row["request_id"],
-                orjson.dumps(request_json).decode("utf-8") if request_json is not None else None,
-                request_format if request_json is not None else None,
-                "application/json" if request_json is not None else None,
-                request_blob_key,
-                request_blob_url,
-                orjson.dumps(response_json).decode("utf-8") if response_json is not None else None,
-                response_format if response_json is not None else None,
-                "application/json" if response_json is not None else None,
-                response_blob_key,
-                response_blob_url,
-                archived_at if compacted else None,
-                clear_request_body,
-                b"",
-                clear_response_body,
-                b"",
-            )
-
-            result.migrated += 1
-            if compacted:
-                result.compacted += 1
 
     return result
 
