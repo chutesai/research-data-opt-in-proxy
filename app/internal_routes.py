@@ -136,7 +136,7 @@ def create_internal_router() -> APIRouter:
     )
     async def compact_json_storage(
         request: Request,
-        limit: int = 500,
+        limit: int = 25,
     ):
         container = request.app.state.container
         settings = container.settings
@@ -160,7 +160,7 @@ def create_internal_router() -> APIRouter:
         outcome = await migrate_raw_http_records_to_compact_json(
             pool=container.db_pool,
             settings=settings,
-            limit=max(1, min(limit, 5000)),
+            limit=max(1, min(limit, 100)),
             object_storage=container.object_storage,
         )
         return {

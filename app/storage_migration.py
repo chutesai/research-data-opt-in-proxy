@@ -31,52 +31,57 @@ async def migrate_raw_http_records_to_compact_json(
 
     result = CompactMigrationResult()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
+        candidate_rows = await conn.fetch(
             """
-            WITH candidate_ids AS (
-                SELECT
-                    request_id,
-                    created_at
-                FROM raw_http_records
-                WHERE request_body_format = 'bytes'
-                   OR response_body_format = 'bytes'
-                   OR (request_body_format = 'json' AND request_json IS NULL)
-                   OR (response_body_format = 'json' AND response_json IS NULL)
-                ORDER BY created_at ASC, request_id ASC
-                LIMIT $1
-            )
             SELECT
-                records.request_id,
-                records.created_at,
-                records.request_body,
-                records.request_json,
-                records.request_body_format,
-                records.stored_request_content_type,
-                records.request_body_size_bytes,
-                records.request_body_sha256,
-                records.request_blob_key,
-                records.request_blob_url,
-                records.response_headers,
-                records.response_body,
-                records.response_json,
-                records.response_body_format,
-                records.stored_response_content_type,
-                records.response_body_size_bytes,
-                records.response_body_sha256,
-                records.response_blob_key,
-                records.response_blob_url,
-                records.archived_at
-            FROM candidate_ids
-            JOIN raw_http_records AS records
-              ON records.request_id = candidate_ids.request_id
-            ORDER BY candidate_ids.created_at ASC, candidate_ids.request_id ASC
+                request_id,
+                created_at
+            FROM raw_http_records
+            WHERE request_body_format = 'bytes'
+               OR response_body_format = 'bytes'
+               OR (request_body_format = 'json' AND request_json IS NULL)
+               OR (response_body_format = 'json' AND response_json IS NULL)
+            ORDER BY created_at ASC, request_id ASC
+            LIMIT $1
             """,
             limit,
         )
 
-        for row in rows:
+        for candidate in candidate_rows:
             result.scanned += 1
             try:
+                row = await conn.fetchrow(
+                    """
+                    SELECT
+                        request_id,
+                        created_at,
+                        request_body,
+                        request_json,
+                        request_body_format,
+                        stored_request_content_type,
+                        request_body_size_bytes,
+                        request_body_sha256,
+                        request_blob_key,
+                        request_blob_url,
+                        response_headers,
+                        response_body,
+                        response_json,
+                        response_body_format,
+                        stored_response_content_type,
+                        response_body_size_bytes,
+                        response_body_sha256,
+                        response_blob_key,
+                        response_blob_url,
+                        archived_at
+                    FROM raw_http_records
+                    WHERE request_id = $1
+                    """,
+                    candidate["request_id"],
+                )
+                if row is None:
+                    result.skipped += 1
+                    continue
+
                 request_body = bytes(row["request_body"])
                 response_body = bytes(row["response_body"])
                 request_json = row["request_json"]

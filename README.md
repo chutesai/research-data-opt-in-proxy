@@ -63,7 +63,7 @@ Storage detail:
 - JSON requests are compacted into `request_json` and can be omitted from the large `BYTEA` column.
 - Complete JSON responses are compacted into `response_json`, including finalized streaming responses reconstructed from SSE.
 - Original raw byte sizes and SHA-256 digests are preserved in metadata columns.
-- Legacy rows can be backfilled into the compact format through the internal compaction endpoint.
+- Legacy rows can be backfilled into the compact format through a trusted-shell script, or in small bounded batches through the internal compaction endpoint.
 
 Sensitive headers are removed before storage based on `STRIPPED_HEADER_NAMES`.
 
@@ -211,17 +211,28 @@ The internal endpoint and manual exporter stream rows incrementally from Postgre
 and object storage, so bounded exports do not need to materialize the full
 result set in memory before bytes start flowing to the caller.
 
-Legacy row compaction endpoint:
+Legacy row compaction endpoint for small bounded batches:
 
 ```bash
 curl -X POST \
   -H "X-Chutes-Archive-Secret: $ARCHIVE_ENDPOINT_SECRET" \
-  "http://localhost:8000/internal/storage/compact-json?limit=500"
+  "http://localhost:8000/internal/storage/compact-json?limit=25"
 ```
 
 This migrates eligible legacy rows into the compact JSON storage columns and,
 when object storage is available, archives the original raw request/response
-bytes before clearing the large in-row payloads.
+bytes before clearing the large in-row payloads. On Vercel, keep this endpoint
+for small maintenance batches only.
+
+Manual backfill from a trusted shell:
+
+```bash
+python scripts/backfill_compact_json.py \
+  --batch-size 25
+```
+
+This is the preferred path for large historical backfills because it runs
+outside the serverless memory limits while still using the same migration code.
 
 Manual script from a trusted shell:
 
