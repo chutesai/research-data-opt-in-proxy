@@ -249,6 +249,63 @@ async def test_stream_proxy_records_sse_response(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_stream_proxy_records_completed_response_without_raw_stream_buffer(
+    settings_factory,
+    db_truncate,
+    db_fetch_one,
+):
+    await db_truncate()
+
+    stream_body = (
+        b'data: {"result":"data: {\\"id\\":\\"chatcmpl-1\\",\\"object\\":\\"chat.completion.chunk\\",\\"created\\":1740000000,\\"model\\":\\"test-model\\",\\"choices\\":[{\\"index\\":0,\\"delta\\":{\\"role\\":\\"assistant\\",\\"content\\":\\"Hel\\"}}]}\\n"}\n\n'
+        b'data: {"result":"data: {\\"id\\":\\"chatcmpl-1\\",\\"object\\":\\"chat.completion.chunk\\",\\"created\\":1740000000,\\"model\\":\\"test-model\\",\\"choices\\":[{\\"index\\":0,\\"delta\\":{\\"content\\":\\"lo\\"},\\"finish_reason\\":\\"stop\\"}],\\"usage\\":{\\"prompt_tokens\\":5,\\"completion_tokens\\":2}}\\n"}\n\n'
+        b'data: {"result":"data: [DONE]\\n"}\n\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            headers={"content-type": "text/event-stream"},
+            content=stream_body,
+        )
+
+    app = create_app(
+        settings_factory(max_stream_buffer_bytes=1),
+        upstream_transport=httpx.MockTransport(handler),
+    )
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "Qwen/Qwen2.5-7B-Instruct",
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+    assert resp.status_code == 200
+    row = await db_fetch_one(
+        """
+        SELECT response_json, response_body_size_bytes, response_body_sha256
+        FROM raw_http_records
+        LIMIT 1
+        """
+    )
+    response_json = row["response_json"]
+    if isinstance(response_json, str):
+        response_json = json.loads(response_json)
+    assert response_json["choices"][0]["message"]["content"] == "Hello"
+    assert row["response_body_size_bytes"] == len(stream_body)
+    assert row["response_body_sha256"] is not None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_incomplete_stream_is_not_recorded(
     settings_factory,
     db_truncate,

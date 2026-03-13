@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -12,6 +13,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from app.anonymizer import build_usage_trace_candidate, parse_json_bytes
 from app.client_ip import extract_client_ip
 from app.chutes_trace import (
+    StreamingTraceMetadataBuilder,
     TraceSSEUnwrapper,
     extract_chutes_trace_metadata,
     unwrap_chutes_non_stream_body,
@@ -304,27 +306,22 @@ def _build_streaming_response(
     container = request.app.state.container
     settings = container.settings
     response_content_type = upstream_response.headers.get("content-type", "text/event-stream")
-    max_buffer = settings.max_stream_buffer_bytes
-    captured_chunks = bytearray()
-    buffer_truncated = False
     unwrapper = TraceSSEUnwrapper()
+    trace_builder = StreamingTraceMetadataBuilder(upstream_response.headers)
     storage_builder = StreamingResponseJsonBuilder()
     request_json, request_body_format = normalize_request_for_storage(request_body)
+    response_body_sha256 = hashlib.sha256()
+    response_body_size_bytes = 0
 
     async def _iterator():
-        nonlocal buffer_truncated
+        nonlocal response_body_size_bytes
         stream_error: str | None = None
         try:
             async for chunk in upstream_response.aiter_bytes():
+                trace_builder.feed(chunk)
                 storage_builder.feed(chunk)
-                if not buffer_truncated:
-                    if max_buffer > 0 and len(captured_chunks) + len(chunk) > max_buffer:
-                        remaining = max_buffer - len(captured_chunks)
-                        if remaining > 0:
-                            captured_chunks.extend(chunk[:remaining])
-                        buffer_truncated = True
-                    else:
-                        captured_chunks.extend(chunk)
+                response_body_sha256.update(chunk)
+                response_body_size_bytes += len(chunk)
                 outgoing_chunk = unwrapper.feed(chunk)
                 if outgoing_chunk:
                     yield outgoing_chunk
@@ -338,85 +335,64 @@ def _build_streaming_response(
         finally:
             completed_at = datetime.now(timezone.utc)
             await upstream_response.aclose()
-            trace_metadata = extract_chutes_trace_metadata(
-                bytes(captured_chunks),
-                response_content_type,
-                upstream_response.headers,
-            )
-            normalized_response = normalize_response_for_storage(
-                bytes(captured_chunks),
-                response_content_type,
-                observed_at=completed_at,
-            )
-            if normalized_response is None:
-                normalized_response = storage_builder.finalize(observed_at=completed_at)
+            trace_metadata = trace_builder.finalize()
+            normalized_response = storage_builder.finalize(observed_at=completed_at)
 
             strip_headers = settings.stripped_header_set
-            raw_record = RawHTTPRecord(
-                request_id=request_id,
-                correlation_id=correlation_id,
-                created_at=started_at,
-                method=request.method,
-                path=request.url.path,
-                query_string=query_string,
-                upstream_url=upstream_url,
-                request_headers=_headers_to_multimap(
-                    request.headers,
-                    strip_keys=strip_headers,
-                    strip_prefixes=_INTERNAL_HEADER_PREFIXES,
-                ),
-                request_body=request_body,
-                request_json=request_json,
-                request_body_format=request_body_format,
-                stored_request_content_type=request.headers.get("content-type"),
-                response_status=upstream_response.status_code,
-                response_headers=_headers_to_multimap(
-                    upstream_response.headers,
-                    strip_keys=strip_headers,
-                    strip_prefixes=_INTERNAL_HEADER_PREFIXES,
-                ),
-                response_body=bytes(captured_chunks),
-                response_json=(
-                    normalized_response.json_payload if normalized_response is not None else None
-                ),
-                response_body_format=(
-                    normalized_response.storage_format
-                    if normalized_response is not None
-                    else ("empty" if not captured_chunks else "bytes")
-                ),
-                stored_response_content_type=(
-                    normalized_response.content_type if normalized_response is not None else None
-                ),
-                duration_ms=_duration_ms(started_at, completed_at),
-                client_ip=client_ip,
-                is_stream=True,
-                upstream_invocation_id=_as_optional_str(trace_metadata.get("upstream_invocation_id")),
-                chutes_trace=trace_metadata,
-                error=stream_error,
-            )
-
-            trace_candidate = build_usage_trace_candidate(
-                request_id=request_id,
-                request_payload=request_payload,
-                response_body=(
-                    normalized_response.body_bytes
-                    if normalized_response is not None
-                    else bytes(captured_chunks)
-                ),
-                response_content_type=(
-                    normalized_response.content_type
-                    if normalized_response is not None
-                    else response_content_type
-                ),
-                observed_at=completed_at,
-                anonymization_hash_salt=settings.anonymization_hash_salt,
-                correlation_id=correlation_id,
-                trace_metadata=trace_metadata,
-            )
             if (
-                normalized_response is not None
+                stream_error is None
+                and normalized_response is not None
                 and _should_record_upstream_result(upstream_response.status_code)
             ):
+                raw_record = RawHTTPRecord(
+                    request_id=request_id,
+                    correlation_id=correlation_id,
+                    created_at=started_at,
+                    method=request.method,
+                    path=request.url.path,
+                    query_string=query_string,
+                    upstream_url=upstream_url,
+                    request_headers=_headers_to_multimap(
+                        request.headers,
+                        strip_keys=strip_headers,
+                        strip_prefixes=_INTERNAL_HEADER_PREFIXES,
+                    ),
+                    request_body=request_body,
+                    request_json=request_json,
+                    request_body_format=request_body_format,
+                    stored_request_content_type=request.headers.get("content-type"),
+                    response_status=upstream_response.status_code,
+                    response_headers=_headers_to_multimap(
+                        upstream_response.headers,
+                        strip_keys=strip_headers,
+                        strip_prefixes=_INTERNAL_HEADER_PREFIXES,
+                    ),
+                    response_body=b"",
+                    response_json=normalized_response.json_payload,
+                    response_body_format=normalized_response.storage_format,
+                    stored_response_content_type=normalized_response.content_type,
+                    duration_ms=_duration_ms(started_at, completed_at),
+                    client_ip=client_ip,
+                    is_stream=True,
+                    upstream_invocation_id=_as_optional_str(
+                        trace_metadata.get("upstream_invocation_id")
+                    ),
+                    chutes_trace=trace_metadata,
+                    response_body_size_bytes=response_body_size_bytes,
+                    response_body_sha256=response_body_sha256.hexdigest(),
+                    error=stream_error,
+                )
+
+                trace_candidate = build_usage_trace_candidate(
+                    request_id=request_id,
+                    request_payload=request_payload,
+                    response_body=normalized_response.body_bytes,
+                    response_content_type=normalized_response.content_type,
+                    observed_at=completed_at,
+                    anonymization_hash_salt=settings.anonymization_hash_salt,
+                    correlation_id=correlation_id,
+                    trace_metadata=trace_metadata,
+                )
                 _spawn_record_task(
                     request=request,
                     recorder=container.recorder,

@@ -5,6 +5,7 @@ import pytest
 import orjson
 
 from app.chutes_trace import (
+    StreamingTraceMetadataBuilder,
     TraceSSEUnwrapper,
     extract_chutes_trace_metadata,
     unwrap_chutes_non_stream_body,
@@ -55,6 +56,26 @@ def test_trace_sse_unwrapper_drops_trace_events():
     assert '"trace"' not in text
     assert ": trace" in text
     assert 'data: {"choices":[{"delta":{"content":"hello"}}]}' in text
+
+
+@pytest.mark.unit
+def test_streaming_trace_metadata_builder_matches_full_extractor():
+    body = (
+        b'data: {"trace":{"timestamp":"2026-03-05T08:17:20.205691","invocation_id":"inv-1","message":"identified 2 available targets"}}\n\n'
+        b'data: {"trace":{"timestamp":"2026-03-05T08:17:20.210865","invocation_id":"inv-1","child_id":"child-1","chute_id":"chute-1","function":"chat_stream","message":"attempting to query target=instance-abc uid=207 hotkey=hotkey-123 coldkey=coldkey-456"}}\n\n'
+        b'data: {"result":"data: {\\"choices\\":[{\\"delta\\":{\\"content\\":\\"ok\\"}}],\\"usage\\":{\\"prompt_tokens\\":5,\\"completion_tokens\\":1}}\\n"}\n\n'
+    )
+    builder = StreamingTraceMetadataBuilder({"X-Chutes-InvocationID": "parent-123"})
+
+    midpoint = len(body) // 2
+    builder.feed(body[:midpoint])
+    builder.feed(body[midpoint:])
+
+    assert builder.finalize() == extract_chutes_trace_metadata(
+        body,
+        "text/event-stream",
+        {"X-Chutes-InvocationID": "parent-123"},
+    )
 
 
 @pytest.mark.unit

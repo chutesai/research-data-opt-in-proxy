@@ -338,3 +338,134 @@ def _result_to_bytes(result: Any) -> bytes:
     if result is None:
         return b"\n"
     return b"data: " + orjson.dumps(result) + b"\n\n"
+
+
+class StreamingTraceMetadataBuilder:
+    def __init__(self, response_headers: Mapping[str, str] | None = None):
+        self._buffer = bytearray()
+        self._trace_events: list[dict[str, Any]] = []
+        self._attempts: list[dict[str, Any]] = []
+        self._errors: list[dict[str, Any]] = []
+        self._total_trace_events = 0
+        self._trace_invocation_id: str | None = None
+        self._upstream_invocation_id = _get_header(
+            response_headers,
+            "x-chutes-invocationid",
+        )
+
+    def feed(self, chunk: bytes) -> None:
+        self._buffer.extend(chunk)
+        while True:
+            newline_idx = self._buffer.find(b"\n")
+            if newline_idx < 0:
+                break
+            line = bytes(self._buffer[: newline_idx + 1])
+            del self._buffer[: newline_idx + 1]
+            self._consume_line(line)
+
+    def finalize(self) -> dict[str, Any]:
+        if self._buffer:
+            trailing = bytes(self._buffer)
+            self._buffer.clear()
+            if not trailing.endswith(b"\n"):
+                trailing += b"\n"
+            self._consume_line(trailing)
+
+        metadata: dict[str, Any] = {}
+        if self._upstream_invocation_id:
+            metadata["upstream_invocation_id"] = self._upstream_invocation_id
+        if self._trace_invocation_id:
+            metadata["trace_invocation_id"] = self._trace_invocation_id
+        if self._total_trace_events:
+            metadata["trace_event_count"] = self._total_trace_events
+        if self._trace_events:
+            metadata["trace_events"] = self._trace_events
+        if self._total_trace_events > len(self._trace_events):
+            metadata["trace_event_truncated"] = True
+        if self._attempts:
+            errored_instances = {
+                (item.get("instance_id"), item.get("child_id"))
+                for item in self._errors
+            }
+            for attempt in self._attempts:
+                attempt["has_error"] = (
+                    (attempt.get("instance_id"), attempt.get("child_id")) in errored_instances
+                )
+            metadata["attempts"] = self._attempts
+        if self._errors:
+            metadata["errors"] = self._errors
+
+        selected_attempt = _select_target_attempt(self._attempts)
+        if selected_attempt:
+            metadata["target_instance_id"] = selected_attempt.get("instance_id")
+            metadata["target_uid"] = selected_attempt.get("uid")
+            metadata["target_hotkey"] = selected_attempt.get("hotkey")
+            metadata["target_coldkey"] = selected_attempt.get("coldkey")
+            metadata["target_child_id"] = selected_attempt.get("child_id")
+
+        return metadata
+
+    def _consume_line(self, line_with_newline: bytes) -> None:
+        stripped = line_with_newline.rstrip(b"\r\n")
+        if not stripped.startswith(b"data:"):
+            return
+        payload_raw = stripped[5:].strip()
+        if not payload_raw or payload_raw == b"[DONE]":
+            return
+        try:
+            payload = orjson.loads(payload_raw)
+        except orjson.JSONDecodeError:
+            return
+        if not isinstance(payload, dict):
+            return
+
+        trace = payload.get("trace")
+        if not isinstance(trace, dict):
+            return
+
+        self._total_trace_events += 1
+        if len(self._trace_events) < _MAX_STORED_TRACE_EVENTS:
+            self._trace_events.append(trace)
+
+        invocation_id = _as_str(trace.get("invocation_id"))
+        if invocation_id:
+            self._trace_invocation_id = invocation_id
+
+        child_id = _as_str(trace.get("child_id"))
+        chute_id = _as_str(trace.get("chute_id"))
+        function_name = _as_str(trace.get("function"))
+        timestamp = _as_str(trace.get("timestamp"))
+        message = _as_str(trace.get("message")) or ""
+
+        if match := _TRACE_TARGET_RE.search(message):
+            self._attempts.append(
+                {
+                    "instance_id": match.group(1),
+                    "uid": _as_int(match.group(2)),
+                    "hotkey": match.group(3),
+                    "coldkey": match.group(4),
+                    "invocation_id": invocation_id,
+                    "child_id": child_id,
+                    "chute_id": chute_id,
+                    "function": function_name,
+                    "timestamp": timestamp,
+                    "message": message,
+                }
+            )
+
+        if match := _TRACE_TARGET_ERROR_RE.search(message):
+            self._errors.append(
+                {
+                    "instance_id": match.group(1),
+                    "uid": _as_int(match.group(2)),
+                    "hotkey": match.group(3),
+                    "coldkey": match.group(4),
+                    "error": match.group(5),
+                    "invocation_id": invocation_id,
+                    "child_id": child_id,
+                    "chute_id": chute_id,
+                    "function": function_name,
+                    "timestamp": timestamp,
+                    "message": message,
+                }
+            )
