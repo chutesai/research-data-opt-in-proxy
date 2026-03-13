@@ -228,6 +228,10 @@ async def _migrate_request_id(
 
                 request_has_json = request_json_exists or request_json is not None
                 response_has_json = response_json_exists or response_json is not None
+                if request_json is not None:
+                    request_json = _strip_nul_chars(request_json)
+                if response_json is not None:
+                    response_json = _strip_nul_chars(response_json)
 
                 if (
                     not request_has_json
@@ -390,3 +394,16 @@ def _looks_like_incomplete_stream(*, response_body: bytes, response_content_type
     if "text/event-stream" in lowered:
         return True
     return response_body.lstrip().startswith(b"data:")
+
+
+def _strip_nul_chars(value):
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, list):
+        return [_strip_nul_chars(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            (_strip_nul_chars(key) if isinstance(key, str) else key): _strip_nul_chars(item)
+            for key, item in value.items()
+        }
+    return value
