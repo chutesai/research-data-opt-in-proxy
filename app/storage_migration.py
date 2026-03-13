@@ -108,21 +108,16 @@ async def _migrate_request_id(
                     SELECT
                         request_id,
                         created_at,
-                        request_body,
-                        request_json,
                         request_body_format,
-                        stored_request_content_type,
-                        request_body_size_bytes,
-                        request_body_sha256,
+                        COALESCE(octet_length(request_body), 0) AS request_body_inline_size,
+                        request_json IS NOT NULL AS has_request_json,
                         request_blob_key,
                         request_blob_url,
                         response_headers,
-                        response_body,
-                        response_json,
                         response_body_format,
                         stored_response_content_type,
-                        response_body_size_bytes,
-                        response_body_sha256,
+                        COALESCE(octet_length(response_body), 0) AS response_body_inline_size,
+                        response_json IS NOT NULL AS has_response_json,
                         response_blob_key,
                         response_blob_url,
                         archived_at
@@ -135,14 +130,56 @@ async def _migrate_request_id(
                     result.skipped = 1
                     return result
 
-                request_body = bytes(row["request_body"])
-                response_body = bytes(row["response_body"])
-                request_json = row["request_json"]
-                response_json = row["response_json"]
                 request_format = row["request_body_format"] or "bytes"
                 response_format = row["response_body_format"] or "bytes"
+                request_blob_key = row["request_blob_key"]
+                request_blob_url = row["request_blob_url"]
+                response_blob_key = row["response_blob_key"]
+                response_blob_url = row["response_blob_url"]
+                archived_at = row["archived_at"]
+                request_inline_size = int(row["request_body_inline_size"] or 0)
+                response_inline_size = int(row["response_body_inline_size"] or 0)
+                request_json_exists = bool(row["has_request_json"])
+                response_json_exists = bool(row["has_response_json"])
+                request_json = None
+                response_json = None
+                request_body = b""
+                response_body = b""
 
-                if request_json is None:
+                request_needs_body = (
+                    not request_json_exists
+                    or (
+                        request_json_exists
+                        and request_inline_size > 0
+                        and request_blob_url is None
+                        and object_storage is not None
+                    )
+                )
+                response_needs_body = (
+                    not response_json_exists
+                    or (
+                        response_json_exists
+                        and response_inline_size > 0
+                        and response_blob_url is None
+                        and object_storage is not None
+                    )
+                )
+
+                if request_needs_body and request_inline_size > 0:
+                    request_body = await _load_inline_body_bytes(
+                        conn=conn,
+                        request_id=row["request_id"],
+                        column="request_body",
+                    )
+
+                if response_needs_body and response_inline_size > 0:
+                    response_body = await _load_inline_body_bytes(
+                        conn=conn,
+                        request_id=row["request_id"],
+                        column="response_body",
+                    )
+
+                if not request_json_exists:
                     if not request_body and row["request_blob_url"] and object_storage is not None:
                         request_body = await object_storage.get_bytes(
                             key=row["request_blob_key"],
@@ -152,7 +189,7 @@ async def _migrate_request_id(
                 elif request_format == "bytes" and not request_body and row["request_blob_url"] is None:
                     request_format = "empty"
 
-                if response_json is None:
+                if not response_json_exists:
                     if not response_body and row["response_blob_url"] and object_storage is not None:
                         response_body = await object_storage.get_bytes(
                             key=row["response_blob_key"],
@@ -161,7 +198,11 @@ async def _migrate_request_id(
                     response_headers = row["response_headers"]
                     if isinstance(response_headers, str):
                         response_headers = orjson.loads(response_headers)
-                    response_content_type = _first_header_value(response_headers, "content-type") or ""
+                    response_content_type = (
+                        row["stored_response_content_type"]
+                        or _first_header_value(response_headers, "content-type")
+                        or ""
+                    )
                     normalized_response = normalize_response_for_storage(
                         response_body,
                         response_content_type,
@@ -175,23 +216,21 @@ async def _migrate_request_id(
                 elif response_format == "bytes" and not response_body and row["response_blob_url"] is None:
                     response_format = "empty"
 
+                request_has_json = request_json_exists or request_json is not None
+                response_has_json = response_json_exists or response_json is not None
+
                 if (
-                    request_json is None
-                    and response_json is None
+                    not request_has_json
+                    and not response_has_json
                     and request_format == "bytes"
                     and response_format == "bytes"
                 ):
                     result.skipped = 1
                     return result
 
-                request_blob_key = row["request_blob_key"]
-                request_blob_url = row["request_blob_url"]
-                response_blob_key = row["response_blob_key"]
-                response_blob_url = row["response_blob_url"]
-                archived_at = row["archived_at"]
                 compacted = False
 
-                if request_json is not None and request_body and request_blob_url is None and object_storage is not None:
+                if request_has_json and request_body and request_blob_url is None and object_storage is not None:
                     request_blob_key, request_blob_url = await _archive_body(
                         object_storage=object_storage,
                         settings=settings,
@@ -202,7 +241,7 @@ async def _migrate_request_id(
                     )
                     compacted = True
 
-                if response_json is not None and response_body and response_blob_url is None and object_storage is not None:
+                if response_has_json and response_body and response_blob_url is None and object_storage is not None:
                     response_blob_key, response_blob_url = await _archive_body(
                         object_storage=object_storage,
                         settings=settings,
@@ -213,11 +252,13 @@ async def _migrate_request_id(
                     )
                     compacted = True
 
+                request_body_present = bool(request_body) or request_inline_size > 0
+                response_body_present = bool(response_body) or response_inline_size > 0
                 clear_request_body = bool(
-                    request_json is not None and (request_blob_url is not None or not request_body)
+                    request_has_json and (request_blob_url is not None or not request_body_present)
                 )
                 clear_response_body = bool(
-                    response_json is not None and (response_blob_url is not None or not response_body)
+                    response_has_json and (response_blob_url is not None or not response_body_present)
                 )
                 request_format_changed = request_format != (row["request_body_format"] or "bytes")
                 response_format_changed = response_format != (row["response_body_format"] or "bytes")
@@ -303,6 +344,24 @@ async def _archive_body(
         content_type="application/octet-stream",
     )
     return stored.key, stored.url
+
+
+async def _load_inline_body_bytes(
+    *,
+    conn: asyncpg.Connection,
+    request_id,
+    column: str,
+) -> bytes:
+    if column not in {"request_body", "response_body"}:
+        raise ValueError(f"Unsupported bytea column: {column}")
+
+    value = await conn.fetchval(
+        f"SELECT {column} FROM raw_http_records WHERE request_id = $1",
+        request_id,
+    )
+    if value is None:
+        return b""
+    return bytes(value)
 
 
 def _first_header_value(headers, key: str) -> str | None:
