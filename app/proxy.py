@@ -231,7 +231,9 @@ def create_proxy_router() -> APIRouter:
                 normalized_response.json_payload if normalized_response is not None else None
             ),
             response_body_format=(
-                normalized_response.storage_format if normalized_response is not None else "bytes"
+                normalized_response.storage_format
+                if normalized_response is not None
+                else ("empty" if not response_body else "bytes")
             ),
             stored_response_content_type=(
                 normalized_response.content_type if normalized_response is not None else None
@@ -378,7 +380,9 @@ def _build_streaming_response(
                     normalized_response.json_payload if normalized_response is not None else None
                 ),
                 response_body_format=(
-                    normalized_response.storage_format if normalized_response is not None else "bytes"
+                    normalized_response.storage_format
+                    if normalized_response is not None
+                    else ("empty" if not captured_chunks else "bytes")
                 ),
                 stored_response_content_type=(
                     normalized_response.content_type if normalized_response is not None else None

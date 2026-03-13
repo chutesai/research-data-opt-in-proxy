@@ -113,6 +113,45 @@ async def test_non_stream_proxy_records_raw_and_trace(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_empty_request_body_is_marked_empty_format(
+    settings_factory,
+    db_truncate,
+    db_fetch_one,
+):
+    await db_truncate()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            content=orjson.dumps({"data": [{"id": "model-1"}]}),
+        )
+
+    app = create_app(settings_factory(), upstream_transport=httpx.MockTransport(handler))
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get("/v1/models")
+
+    assert resp.status_code == 200
+
+    raw_row = await db_fetch_one(
+        """
+        SELECT request_json, request_body_format, octet_length(request_body) AS request_len
+        FROM raw_http_records
+        LIMIT 1
+        """
+    )
+    assert raw_row["request_json"] is None
+    assert raw_row["request_body_format"] == "empty"
+    assert raw_row["request_len"] == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_stream_proxy_records_sse_response(
     settings_factory,
     db_truncate,

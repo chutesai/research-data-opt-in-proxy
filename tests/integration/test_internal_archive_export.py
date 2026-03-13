@@ -402,3 +402,103 @@ async def test_compact_json_endpoint_migrates_existing_wrapped_response(
     assert row["response_body_format"] == "json"
     assert request_json["messages"][0]["content"] == "hello"
     assert response_json["choices"][0]["message"]["content"] == "ok"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_compact_json_endpoint_marks_empty_request_body(
+    settings_factory,
+    db_truncate,
+    db_fetch_one,
+):
+    await db_truncate()
+
+    archive_secret = "archive-secret-test"
+    settings = settings_factory(
+        archive_endpoint_secret=archive_secret,
+        enable_qwen_trace_recording=False,
+        archive_storage_provider="auto",
+        archive_s3_bucket="",
+        vercel_blob_read_write_token="",
+    )
+
+    app = create_app(settings, upstream_transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+
+    async with app.router.lifespan_context(app):
+        await app.state.container.db_pool.execute(
+            """
+            INSERT INTO raw_http_records (
+                request_id,
+                correlation_id,
+                created_at,
+                method,
+                path,
+                query_string,
+                upstream_url,
+                request_headers,
+                request_body,
+                response_status,
+                response_headers,
+                response_body,
+                response_json,
+                response_body_format,
+                stored_response_content_type,
+                duration_ms,
+                client_ip,
+                is_stream,
+                upstream_invocation_id,
+                chutes_trace,
+                error
+            ) VALUES (
+                '00000000-0000-0000-0000-000000000109'::uuid,
+                '00000000-0000-0000-0000-000000000209'::uuid,
+                NOW(),
+                'GET',
+                '/v1/models',
+                '',
+                'https://llm.chutes.ai/v1/models',
+                '{}'::jsonb,
+                ''::bytea,
+                200,
+                '{"content-type":["application/json"]}'::jsonb,
+                ''::bytea,
+                '{"data":[{"id":"model-1"}]}'::jsonb,
+                'json',
+                'application/json',
+                12,
+                '1.2.3.4',
+                false,
+                NULL,
+                '{}'::jsonb,
+                NULL
+            )
+            """
+        )
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/internal/storage/compact-json?limit=10",
+                headers={"X-Chutes-Archive-Secret": archive_secret},
+            )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["migrated"] == 1
+    assert payload["compacted"] == 1
+
+    row = await db_fetch_one(
+        """
+        SELECT
+            request_json,
+            request_body_format,
+            octet_length(request_body) AS request_len
+        FROM raw_http_records
+        LIMIT 1
+        """
+    )
+    assert row["request_json"] is None
+    assert row["request_body_format"] == "empty"
+    assert row["request_len"] == 0

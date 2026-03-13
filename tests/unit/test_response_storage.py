@@ -18,6 +18,14 @@ def test_normalize_request_for_storage_compacts_json():
 
 
 @pytest.mark.unit
+def test_normalize_request_for_storage_marks_empty_body():
+    payload, body_format = normalize_request_for_storage(b"")
+
+    assert payload is None
+    assert body_format == "empty"
+
+
+@pytest.mark.unit
 def test_normalize_response_for_storage_unwraps_trace_json_envelope():
     body = (
         b'data: {"trace":{"message":"identified"}}\n\n'

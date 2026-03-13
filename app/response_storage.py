@@ -132,6 +132,8 @@ def normalize_response_for_storage(
 
 
 def normalize_request_for_storage(request_body: bytes) -> tuple[Any | None, str]:
+    if not request_body:
+        return None, "empty"
     payload = _try_parse_json(request_body)
     if payload is None:
         return None, "bytes"

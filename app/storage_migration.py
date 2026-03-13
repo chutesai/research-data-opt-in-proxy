@@ -55,10 +55,10 @@ async def migrate_raw_http_records_to_compact_json(
                 response_blob_url,
                 archived_at
             FROM raw_http_records
-            WHERE request_json IS NULL
-               OR response_json IS NULL
-               OR request_body_format = 'bytes'
+            WHERE request_body_format = 'bytes'
                OR response_body_format = 'bytes'
+               OR (request_body_format = 'json' AND request_json IS NULL)
+               OR (response_body_format = 'json' AND response_json IS NULL)
             ORDER BY created_at ASC, request_id ASC
             LIMIT $1
             """,
@@ -82,6 +82,8 @@ async def migrate_raw_http_records_to_compact_json(
                             url=row["request_blob_url"],
                         )
                     request_json, request_format = normalize_request_for_storage(request_body)
+                elif request_format == "bytes" and not request_body and row["request_blob_url"] is None:
+                    request_format = "empty"
 
                 if response_json is None:
                     if not response_body and row["response_blob_url"] and object_storage is not None:
@@ -101,8 +103,12 @@ async def migrate_raw_http_records_to_compact_json(
                     if normalized_response is not None:
                         response_json = normalized_response.json_payload
                         response_format = normalized_response.storage_format
+                    elif not response_body and row["response_blob_url"] is None:
+                        response_format = "empty"
+                elif response_format == "bytes" and not response_body and row["response_blob_url"] is None:
+                    response_format = "empty"
 
-                if request_json is None and response_json is None:
+                if request_json is None and response_json is None and request_format == "bytes" and response_format == "bytes":
                     result.skipped += 1
                     continue
 
@@ -141,8 +147,12 @@ async def migrate_raw_http_records_to_compact_json(
                 clear_response_body = bool(
                     response_json is not None and (response_blob_url is not None or not response_body)
                 )
+                request_format_changed = request_format != (row["request_body_format"] or "bytes")
+                response_format_changed = response_format != (row["response_body_format"] or "bytes")
 
                 if clear_request_body or clear_response_body:
+                    compacted = True
+                if request_format_changed or response_format_changed:
                     compacted = True
 
                 await conn.execute(
@@ -174,12 +184,12 @@ async def migrate_raw_http_records_to_compact_json(
                     """,
                     row["request_id"],
                     orjson.dumps(request_json).decode("utf-8") if request_json is not None else None,
-                    request_format if request_json is not None else None,
+                    request_format if (request_json is not None or request_format_changed) else None,
                     "application/json" if request_json is not None else None,
                     request_blob_key,
                     request_blob_url,
                     orjson.dumps(response_json).decode("utf-8") if response_json is not None else None,
-                    response_format if response_json is not None else None,
+                    response_format if (response_json is not None or response_format_changed) else None,
                     "application/json" if response_json is not None else None,
                     response_blob_key,
                     response_blob_url,
