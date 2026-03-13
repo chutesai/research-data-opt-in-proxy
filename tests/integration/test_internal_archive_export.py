@@ -72,19 +72,56 @@ async def test_archive_and_export_internal_endpoints(
 
     async with app.router.lifespan_context(app):
         app.state.container.object_storage = fake_storage
+        await app.state.container.db_pool.execute(
+            """
+            INSERT INTO raw_http_records (
+                request_id,
+                correlation_id,
+                created_at,
+                method,
+                path,
+                query_string,
+                upstream_url,
+                request_headers,
+                request_body,
+                response_status,
+                response_headers,
+                response_body,
+                duration_ms,
+                client_ip,
+                is_stream,
+                upstream_invocation_id,
+                chutes_trace,
+                error
+            ) VALUES (
+                '00000000-0000-0000-0000-000000000010'::uuid,
+                '00000000-0000-0000-0000-000000000110'::uuid,
+                NOW(),
+                'POST',
+                '/v1/chat/completions',
+                '',
+                'https://llm.chutes.ai/v1/chat/completions',
+                '{}'::jsonb,
+                $1::bytea,
+                200,
+                '{"content-type":["application/json"]}'::jsonb,
+                $2::bytea,
+                123,
+                '1.2.3.4',
+                false,
+                'inv-legacy',
+                '{}'::jsonb,
+                NULL
+            )
+            """,
+            b'{"model":"m","messages":[{"role":"user","content":"hello"}]}',
+            b'{"choices":[{"message":{"content":"ok"}}]}',
+        )
 
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
         ) as client:
-            # Insert one row via normal proxy path.
-            proxied = await client.post(
-                "/v1/chat/completions",
-                json={"model": "m", "messages": [{"role": "user", "content": "hello"}]},
-            )
-            assert proxied.status_code == 200
-            assert "x-chutes-correlation-id" not in proxied.headers
-
             unauthorized_archive = await client.post("/internal/archive/run")
             assert unauthorized_archive.status_code == 401
 
@@ -245,3 +282,123 @@ async def test_export_resolve_archived_bodies_requires_object_storage(
 
     assert resp.status_code == 500
     assert resp.json() == {"error": "object_storage_not_configured"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_compact_json_endpoint_migrates_existing_wrapped_response(
+    settings_factory,
+    db_truncate,
+    db_fetch_one,
+):
+    await db_truncate()
+
+    archive_secret = "archive-secret-test"
+    settings = settings_factory(
+        archive_endpoint_secret=archive_secret,
+        enable_qwen_trace_recording=False,
+        archive_storage_provider="auto",
+        archive_s3_bucket="",
+        vercel_blob_read_write_token="",
+    )
+
+    wrapped_body = (
+        b'data: {"trace":{"invocation_id":"inv-1","message":"identified"}}\n\n'
+        b'data: {"content_type":"application/json","json":{"id":"chatcmpl-1","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}}\n\n'
+    )
+
+    app = create_app(settings, upstream_transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+    fake_storage = _FakeObjectStorage()
+
+    async with app.router.lifespan_context(app):
+        app.state.container.object_storage = fake_storage
+
+        await app.state.container.db_pool.execute(
+            """
+            INSERT INTO raw_http_records (
+                request_id,
+                correlation_id,
+                created_at,
+                method,
+                path,
+                query_string,
+                upstream_url,
+                request_headers,
+                request_body,
+                response_status,
+                response_headers,
+                response_body,
+                duration_ms,
+                client_ip,
+                is_stream,
+                upstream_invocation_id,
+                chutes_trace,
+                error
+            ) VALUES (
+                '00000000-0000-0000-0000-000000000099'::uuid,
+                '00000000-0000-0000-0000-000000000199'::uuid,
+                NOW(),
+                'POST',
+                '/v1/chat/completions',
+                '',
+                'https://llm.chutes.ai/v1/chat/completions',
+                '{}'::jsonb,
+                $2::bytea,
+                200,
+                '{"content-type":["text/event-stream"]}'::jsonb,
+                $1::bytea,
+                123,
+                '1.2.3.4',
+                false,
+                'inv-1',
+                '{}'::jsonb,
+                NULL
+            )
+            """,
+            wrapped_body,
+            b'{"model":"m","messages":[{"role":"user","content":"hello"}]}',
+        )
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/internal/storage/compact-json?limit=10",
+                headers={"X-Chutes-Archive-Secret": archive_secret},
+            )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["migrated"] == 1
+    assert payload["compacted"] == 1
+
+    row = await db_fetch_one(
+        """
+        SELECT
+            request_json,
+            response_json,
+            request_body_format,
+            response_body_format,
+            octet_length(request_body) AS request_len,
+            octet_length(response_body) AS response_len,
+            request_blob_url,
+            response_blob_url
+        FROM raw_http_records
+        LIMIT 1
+        """
+    )
+    assert row["request_len"] == 0
+    assert row["response_len"] == 0
+    assert row["request_blob_url"].startswith("mem://")
+    assert row["response_blob_url"].startswith("mem://")
+    request_json = row["request_json"]
+    response_json = row["response_json"]
+    if isinstance(request_json, str):
+        request_json = json.loads(request_json)
+    if isinstance(response_json, str):
+        response_json = json.loads(response_json)
+    assert row["request_body_format"] == "json"
+    assert row["response_body_format"] == "json"
+    assert request_json["messages"][0]["content"] == "hello"
+    assert response_json["choices"][0]["message"]["content"] == "ok"

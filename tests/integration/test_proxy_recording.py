@@ -88,11 +88,27 @@ async def test_non_stream_proxy_records_raw_and_trace(
     assert metadata["correlation_id"] == seen["forwarded_correlation_id"]
 
     raw_row = await db_fetch_one(
-        "SELECT correlation_id, upstream_invocation_id FROM raw_http_records LIMIT 1",
+        """
+        SELECT
+            correlation_id,
+            upstream_invocation_id,
+            request_json,
+            response_json,
+            request_body_format,
+            response_body_format,
+            octet_length(request_body) AS request_len,
+            octet_length(response_body) AS response_len
+        FROM raw_http_records
+        LIMIT 1
+        """,
     )
     assert raw_row["upstream_invocation_id"] == "parent-invocation-123"
     assert raw_row["correlation_id"] is not None
     assert str(raw_row["correlation_id"]) == seen["forwarded_correlation_id"]
+    assert raw_row["request_len"] == 0
+    assert raw_row["response_len"] == 0
+    assert raw_row["request_body_format"] == "json"
+    assert raw_row["response_body_format"] == "json"
 
 
 @pytest.mark.integration
@@ -148,13 +164,32 @@ async def test_stream_proxy_records_sse_response(
     assert "x-chutes-invocationid" not in resp.headers
 
     raw = await db_fetch_one(
-        "SELECT is_stream, response_body, chutes_trace, correlation_id, upstream_invocation_id FROM raw_http_records LIMIT 1",
+        """
+        SELECT
+            is_stream,
+            response_body,
+            response_json,
+            response_body_format,
+            stored_response_content_type,
+            chutes_trace,
+            correlation_id,
+            upstream_invocation_id
+        FROM raw_http_records
+        LIMIT 1
+        """,
     )
     chutes_trace = raw["chutes_trace"]
     if isinstance(chutes_trace, str):
         chutes_trace = json.loads(chutes_trace)
     assert raw["is_stream"] is True
-    assert b'"trace"' in raw["response_body"]
+    assert raw["response_body"] == b""
+    response_json = raw["response_json"]
+    if isinstance(response_json, str):
+        response_json = json.loads(response_json)
+    assert raw["response_body_format"] == "json"
+    assert raw["stored_response_content_type"] == "application/json"
+    assert response_json["choices"][0]["message"]["content"] == "AB"
+    assert response_json["usage"]["completion_tokens"] == 2
     assert chutes_trace["target_instance_id"] == "instance-abc"
     assert chutes_trace["target_uid"] == 207
     assert chutes_trace["target_hotkey"] == "hotkey-123"
@@ -171,6 +206,49 @@ async def test_stream_proxy_records_sse_response(
     assert trace_row["input_length"] == 7
     assert trace_row["output_length"] == 2
     assert metadata["target_instance_id"] == "instance-abc"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_incomplete_stream_is_not_recorded(
+    settings_factory,
+    db_truncate,
+    db_fetch_value,
+):
+    await db_truncate()
+
+    stream_body = (
+        b'data: {"result":"data: {\\"choices\\":[{\\"delta\\":{\\"content\\":\\"A\\"}}]}\\n"}\n\n'
+        b'data: {"result":"data: {\\"choices\\":[{\\"delta\\":{\\"content\\":\\"B\\"}}]}\\n"}\n\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            headers={"content-type": "text/event-stream"},
+            content=stream_body,
+        )
+
+    app = create_app(settings_factory(), upstream_transport=httpx.MockTransport(handler))
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "Qwen/Qwen2.5-7B-Instruct",
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+    assert resp.status_code == 200
+    assert '"delta":{"content":"A"}' in resp.text
+    assert await db_fetch_value("SELECT COUNT(*) FROM raw_http_records") == 0
+    assert await db_fetch_value("SELECT COUNT(*) FROM anon_usage_traces") == 0
 
 
 @pytest.mark.integration

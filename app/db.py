@@ -14,9 +14,15 @@ CREATE TABLE IF NOT EXISTS raw_http_records (
     upstream_url TEXT NOT NULL,
     request_headers JSONB NOT NULL,
     request_body BYTEA NOT NULL,
+    request_json JSONB,
+    request_body_format TEXT NOT NULL DEFAULT 'bytes',
+    stored_request_content_type TEXT,
     response_status INTEGER NOT NULL,
     response_headers JSONB NOT NULL,
     response_body BYTEA NOT NULL,
+    response_json JSONB,
+    response_body_format TEXT NOT NULL DEFAULT 'bytes',
+    stored_response_content_type TEXT,
     request_body_size_bytes INTEGER,
     request_body_sha256 TEXT,
     request_blob_key TEXT,
@@ -46,6 +52,12 @@ ALTER TABLE raw_http_records
 ALTER TABLE raw_http_records
     ADD COLUMN IF NOT EXISTS request_body_sha256 TEXT;
 ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS request_json JSONB;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS request_body_format TEXT NOT NULL DEFAULT 'bytes';
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS stored_request_content_type TEXT;
+ALTER TABLE raw_http_records
     ADD COLUMN IF NOT EXISTS request_blob_key TEXT;
 ALTER TABLE raw_http_records
     ADD COLUMN IF NOT EXISTS request_blob_url TEXT;
@@ -53,6 +65,12 @@ ALTER TABLE raw_http_records
     ADD COLUMN IF NOT EXISTS response_body_size_bytes INTEGER;
 ALTER TABLE raw_http_records
     ADD COLUMN IF NOT EXISTS response_body_sha256 TEXT;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS response_json JSONB;
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS response_body_format TEXT NOT NULL DEFAULT 'bytes';
+ALTER TABLE raw_http_records
+    ADD COLUMN IF NOT EXISTS stored_response_content_type TEXT;
 ALTER TABLE raw_http_records
     ADD COLUMN IF NOT EXISTS response_blob_key TEXT;
 ALTER TABLE raw_http_records

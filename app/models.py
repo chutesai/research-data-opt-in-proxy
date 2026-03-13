@@ -17,9 +17,15 @@ class RawHTTPRecord:
     upstream_url: str
     request_headers: dict[str, list[str]]
     request_body: bytes
+    request_json: Any | None
+    request_body_format: str
+    stored_request_content_type: str | None
     response_status: int
     response_headers: dict[str, list[str]]
     response_body: bytes
+    response_json: Any | None
+    response_body_format: str
+    stored_response_content_type: str | None
     duration_ms: int
     client_ip: str | None
     is_stream: bool

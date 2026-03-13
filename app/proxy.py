@@ -17,6 +17,11 @@ from app.chutes_trace import (
     unwrap_chutes_non_stream_body,
 )
 from app.models import RawHTTPRecord
+from app.response_storage import (
+    StreamingResponseJsonBuilder,
+    normalize_request_for_storage,
+    normalize_response_for_storage,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -94,6 +99,7 @@ def create_proxy_router() -> APIRouter:
             )
 
         request_payload = parse_json_bytes(body)
+        request_json, request_body_format = normalize_request_for_storage(body)
         client_ip = extract_client_ip(request)
 
         query_string = request.url.query or ""
@@ -190,6 +196,12 @@ def create_proxy_router() -> APIRouter:
         if unwrapped := unwrap_chutes_non_stream_body(response_body):
             client_response_body, client_response_content_type = unwrapped
 
+        normalized_response = normalize_response_for_storage(
+            response_body,
+            response_content_type,
+            observed_at=completed_at,
+        )
+
         strip_headers = settings.stripped_header_set
         raw_record = RawHTTPRecord(
             request_id=request_id,
@@ -205,6 +217,9 @@ def create_proxy_router() -> APIRouter:
                 strip_prefixes=_INTERNAL_HEADER_PREFIXES,
             ),
             request_body=body,
+            request_json=request_json,
+            request_body_format=request_body_format,
+            stored_request_content_type=request.headers.get("content-type"),
             response_status=upstream_response.status_code,
             response_headers=_headers_to_multimap(
                 upstream_response.headers,
@@ -212,6 +227,15 @@ def create_proxy_router() -> APIRouter:
                 strip_prefixes=_INTERNAL_HEADER_PREFIXES,
             ),
             response_body=response_body,
+            response_json=(
+                normalized_response.json_payload if normalized_response is not None else None
+            ),
+            response_body_format=(
+                normalized_response.storage_format if normalized_response is not None else "bytes"
+            ),
+            stored_response_content_type=(
+                normalized_response.content_type if normalized_response is not None else None
+            ),
             duration_ms=_duration_ms(started_at, completed_at),
             client_ip=client_ip,
             is_stream=False,
@@ -223,8 +247,16 @@ def create_proxy_router() -> APIRouter:
         trace_candidate = build_usage_trace_candidate(
             request_id=request_id,
             request_payload=request_payload,
-            response_body=client_response_body,
-            response_content_type=client_response_content_type,
+            response_body=(
+                normalized_response.body_bytes
+                if normalized_response is not None
+                else client_response_body
+            ),
+            response_content_type=(
+                normalized_response.content_type
+                if normalized_response is not None
+                else client_response_content_type
+            ),
             observed_at=completed_at,
             anonymization_hash_salt=settings.anonymization_hash_salt,
             correlation_id=correlation_id,
@@ -274,12 +306,15 @@ def _build_streaming_response(
     captured_chunks = bytearray()
     buffer_truncated = False
     unwrapper = TraceSSEUnwrapper()
+    storage_builder = StreamingResponseJsonBuilder()
+    request_json, request_body_format = normalize_request_for_storage(request_body)
 
     async def _iterator():
         nonlocal buffer_truncated
         stream_error: str | None = None
         try:
             async for chunk in upstream_response.aiter_bytes():
+                storage_builder.feed(chunk)
                 if not buffer_truncated:
                     if max_buffer > 0 and len(captured_chunks) + len(chunk) > max_buffer:
                         remaining = max_buffer - len(captured_chunks)
@@ -306,6 +341,13 @@ def _build_streaming_response(
                 response_content_type,
                 upstream_response.headers,
             )
+            normalized_response = normalize_response_for_storage(
+                bytes(captured_chunks),
+                response_content_type,
+                observed_at=completed_at,
+            )
+            if normalized_response is None:
+                normalized_response = storage_builder.finalize(observed_at=completed_at)
 
             strip_headers = settings.stripped_header_set
             raw_record = RawHTTPRecord(
@@ -322,6 +364,9 @@ def _build_streaming_response(
                     strip_prefixes=_INTERNAL_HEADER_PREFIXES,
                 ),
                 request_body=request_body,
+                request_json=request_json,
+                request_body_format=request_body_format,
+                stored_request_content_type=request.headers.get("content-type"),
                 response_status=upstream_response.status_code,
                 response_headers=_headers_to_multimap(
                     upstream_response.headers,
@@ -329,6 +374,15 @@ def _build_streaming_response(
                     strip_prefixes=_INTERNAL_HEADER_PREFIXES,
                 ),
                 response_body=bytes(captured_chunks),
+                response_json=(
+                    normalized_response.json_payload if normalized_response is not None else None
+                ),
+                response_body_format=(
+                    normalized_response.storage_format if normalized_response is not None else "bytes"
+                ),
+                stored_response_content_type=(
+                    normalized_response.content_type if normalized_response is not None else None
+                ),
                 duration_ms=_duration_ms(started_at, completed_at),
                 client_ip=client_ip,
                 is_stream=True,
@@ -340,14 +394,25 @@ def _build_streaming_response(
             trace_candidate = build_usage_trace_candidate(
                 request_id=request_id,
                 request_payload=request_payload,
-                response_body=bytes(captured_chunks),
-                response_content_type=response_content_type,
+                response_body=(
+                    normalized_response.body_bytes
+                    if normalized_response is not None
+                    else bytes(captured_chunks)
+                ),
+                response_content_type=(
+                    normalized_response.content_type
+                    if normalized_response is not None
+                    else response_content_type
+                ),
                 observed_at=completed_at,
                 anonymization_hash_salt=settings.anonymization_hash_salt,
                 correlation_id=correlation_id,
                 trace_metadata=trace_metadata,
             )
-            if _should_record_upstream_result(upstream_response.status_code):
+            if (
+                normalized_response is not None
+                and _should_record_upstream_result(upstream_response.status_code)
+            ):
                 _spawn_record_task(
                     request=request,
                     recorder=container.recorder,

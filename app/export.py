@@ -25,6 +25,9 @@ SELECT
     upstream_url,
     request_headers,
     request_body,
+    request_json,
+    request_body_format,
+    stored_request_content_type,
     request_body_size_bytes,
     request_body_sha256,
     request_blob_key,
@@ -32,6 +35,9 @@ SELECT
     response_status,
     response_headers,
     response_body,
+    response_json,
+    response_body_format,
+    stored_response_content_type,
     response_body_size_bytes,
     response_body_sha256,
     response_blob_key,
@@ -63,23 +69,32 @@ async def raw_row_to_jsonl(
     object_storage: ObjectStorage | None = None,
     resolve_archived_bodies: bool = False,
 ) -> bytes:
+    request_json = row["request_json"]
+    response_json = row["response_json"]
     request_payload = bytes(row["request_body"])
     response_payload = bytes(row["response_body"])
 
-    if resolve_archived_bodies and object_storage is not None:
-        if not request_payload and row.get("request_blob_url"):
+    if request_json is None and resolve_archived_bodies and object_storage is not None:
+        if not request_payload and row["request_blob_url"]:
             request_payload = await object_storage.get_bytes(
-                key=row.get("request_blob_key"),
-                url=row.get("request_blob_url"),
+                key=row["request_blob_key"],
+                url=row["request_blob_url"],
             )
-        if not response_payload and row.get("response_blob_url"):
+    if response_json is None and resolve_archived_bodies and object_storage is not None:
+        if not response_payload and row["response_blob_url"]:
             response_payload = await object_storage.get_bytes(
-                key=row.get("response_blob_key"),
-                url=row.get("response_blob_url"),
+                key=row["response_blob_key"],
+                url=row["response_blob_url"],
             )
 
-    request_body_text, request_body_base64 = _decode_body(request_payload)
-    response_body_text, response_body_base64 = _decode_body(response_payload)
+    request_body_text, request_body_base64 = _decode_body(
+        request_payload,
+        json_value=request_json,
+    )
+    response_body_text, response_body_base64 = _decode_body(
+        response_payload,
+        json_value=response_json,
+    )
 
     record = {
         "request_id": str(row["request_id"]),
@@ -92,6 +107,8 @@ async def raw_row_to_jsonl(
         "request_headers": _json_field(row["request_headers"]),
         "request_body_text": request_body_text,
         "request_body_base64": request_body_base64,
+        "request_body_format": row["request_body_format"],
+        "stored_request_content_type": row["stored_request_content_type"],
         "request_body_size_bytes": row["request_body_size_bytes"],
         "request_body_sha256": row["request_body_sha256"],
         "request_blob_key": row["request_blob_key"],
@@ -100,6 +117,8 @@ async def raw_row_to_jsonl(
         "response_headers": _json_field(row["response_headers"]),
         "response_body_text": response_body_text,
         "response_body_base64": response_body_base64,
+        "response_body_format": row["response_body_format"],
+        "stored_response_content_type": row["stored_response_content_type"],
         "response_body_size_bytes": row["response_body_size_bytes"],
         "response_body_sha256": row["response_body_sha256"],
         "response_blob_key": row["response_blob_key"],
@@ -229,7 +248,14 @@ def _json_field(value: Any) -> Any:
     return value
 
 
-def _decode_body(body: bytes | bytearray | memoryview) -> tuple[str | None, str | None]:
+def _decode_body(
+    body: bytes | bytearray | memoryview,
+    *,
+    json_value: Any | None = None,
+) -> tuple[str | None, str | None]:
+    if json_value is not None:
+        return orjson.dumps(json_value).decode("utf-8"), None
+
     payload = bytes(body)
     if not payload:
         return "", None

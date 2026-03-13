@@ -44,6 +44,8 @@ The service:
 - Enforces configurable request body size limits.
 - Caps SSE stream buffer size to prevent memory exhaustion.
 - Optionally rate-limits requests per client IP.
+- Stores JSON request/response payloads in compact form when a complete final payload can be reconstructed.
+- Skips incomplete streaming exchanges instead of persisting partial request/response pairs.
 
 ## Recording Formats
 
@@ -56,6 +58,12 @@ Stores:
 - Object storage archival metadata: request/response object key+url, SHA-256 checksum, size bytes, archived timestamp.
 - Correlation and trace metadata: correlation ID, invocation IDs, selected target instance/uid/hotkey/coldkey, and parsed trace events.
 - Stream flag and optional transport error field.
+
+Storage detail:
+- JSON requests are compacted into `request_json` and can be omitted from the large `BYTEA` column.
+- Complete JSON responses are compacted into `response_json`, including finalized streaming responses reconstructed from SSE.
+- Original raw byte sizes and SHA-256 digests are preserved in metadata columns.
+- Legacy rows can be backfilled into the compact format through the internal compaction endpoint.
 
 Sensitive headers are removed before storage based on `STRIPPED_HEADER_NAMES`.
 
@@ -202,6 +210,18 @@ curl -H "X-Chutes-Export-Secret: $EXPORT_ENDPOINT_SECRET" \
 The internal endpoint and manual exporter stream rows incrementally from Postgres
 and object storage, so bounded exports do not need to materialize the full
 result set in memory before bytes start flowing to the caller.
+
+Legacy row compaction endpoint:
+
+```bash
+curl -X POST \
+  -H "X-Chutes-Archive-Secret: $ARCHIVE_ENDPOINT_SECRET" \
+  "http://localhost:8000/internal/storage/compact-json?limit=500"
+```
+
+This migrates eligible legacy rows into the compact JSON storage columns and,
+when object storage is available, archives the original raw request/response
+bytes before clearing the large in-row payloads.
 
 Manual script from a trusted shell:
 

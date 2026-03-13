@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.archive_worker import archive_small_batch
 from app.db import cleanup_old_records
 from app.export import iter_raw_http_jsonl
+from app.storage_migration import migrate_raw_http_records_to_compact_json
 
 
 def create_internal_router() -> APIRouter:
@@ -127,6 +128,49 @@ def create_internal_router() -> APIRouter:
             media_type="application/x-ndjson",
             headers={"cache-control": "no-store"},
         )
+
+    @router.api_route(
+        "/internal/storage/compact-json",
+        methods=["GET", "POST"],
+        include_in_schema=False,
+    )
+    async def compact_json_storage(
+        request: Request,
+        limit: int = 500,
+    ):
+        container = request.app.state.container
+        settings = container.settings
+
+        if not settings.archive_endpoint_secret:
+            return JSONResponse(status_code=404, content={"error": "not_found"})
+
+        if not _secret_ok(
+            request=request,
+            expected=settings.archive_endpoint_secret,
+            header_name=settings.archive_endpoint_secret_header_name,
+        ):
+            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+
+        if container.db_pool is None:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "db_not_configured"},
+            )
+
+        outcome = await migrate_raw_http_records_to_compact_json(
+            pool=container.db_pool,
+            settings=settings,
+            limit=max(1, min(limit, 5000)),
+            object_storage=container.object_storage,
+        )
+        return {
+            "ok": True,
+            "scanned": outcome.scanned,
+            "migrated": outcome.migrated,
+            "compacted": outcome.compacted,
+            "skipped": outcome.skipped,
+            "object_storage_configured": container.object_storage is not None,
+        }
 
     return router
 

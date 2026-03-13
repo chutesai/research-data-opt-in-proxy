@@ -36,22 +36,33 @@ class PostgresRecorder:
             await self._record_trace(trace_candidate)
 
     async def _record_raw_http(self, record: RawHTTPRecord) -> None:
+        original_request_body = bytes(record.request_body)
+        original_response_body = bytes(record.response_body)
+
+        record.request_body_size_bytes = (
+            record.request_body_size_bytes
+            if record.request_body_size_bytes is not None
+            else len(original_request_body)
+        )
+        record.response_body_size_bytes = (
+            record.response_body_size_bytes
+            if record.response_body_size_bytes is not None
+            else len(original_response_body)
+        )
+        record.request_body_sha256 = (
+            record.request_body_sha256
+            or hashlib.sha256(original_request_body).hexdigest()
+        )
+        record.response_body_sha256 = (
+            record.response_body_sha256
+            or hashlib.sha256(original_response_body).hexdigest()
+        )
+
         record = await self._archive_inline_if_enabled(record)
+        record = self._compact_json_payloads(record)
 
         request_body = _truncate_bytes(record.request_body, self.settings.max_recorded_body_bytes)
         response_body = _truncate_bytes(record.response_body, self.settings.max_recorded_body_bytes)
-        request_size = (
-            record.request_body_size_bytes
-            if record.request_body_size_bytes is not None
-            else len(request_body)
-        )
-        response_size = (
-            record.response_body_size_bytes
-            if record.response_body_size_bytes is not None
-            else len(response_body)
-        )
-        request_sha256 = record.request_body_sha256 or hashlib.sha256(request_body).hexdigest()
-        response_sha256 = record.response_body_sha256 or hashlib.sha256(response_body).hexdigest()
 
         await self.pool.execute(
             """
@@ -65,6 +76,9 @@ class PostgresRecorder:
                 upstream_url,
                 request_headers,
                 request_body,
+                request_json,
+                request_body_format,
+                stored_request_content_type,
                 request_body_size_bytes,
                 request_body_sha256,
                 request_blob_key,
@@ -72,6 +86,9 @@ class PostgresRecorder:
                 response_status,
                 response_headers,
                 response_body,
+                response_json,
+                response_body_format,
+                stored_response_content_type,
                 response_body_size_bytes,
                 response_body_sha256,
                 response_blob_key,
@@ -85,7 +102,7 @@ class PostgresRecorder:
                 chutes_trace,
                 error
             ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27::jsonb,$28
+                $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10::jsonb,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20::jsonb,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33::jsonb,$34
             )
             """,
             record.request_id,
@@ -97,15 +114,25 @@ class PostgresRecorder:
             record.upstream_url,
             orjson.dumps(record.request_headers).decode("utf-8"),
             request_body,
-            request_size,
-            request_sha256,
+            orjson.dumps(record.request_json).decode("utf-8")
+            if record.request_json is not None
+            else None,
+            record.request_body_format,
+            record.stored_request_content_type,
+            record.request_body_size_bytes,
+            record.request_body_sha256,
             record.request_blob_key,
             record.request_blob_url,
             record.response_status,
             orjson.dumps(record.response_headers).decode("utf-8"),
             response_body,
-            response_size,
-            response_sha256,
+            orjson.dumps(record.response_json).decode("utf-8")
+            if record.response_json is not None
+            else None,
+            record.response_body_format,
+            record.stored_response_content_type,
+            record.response_body_size_bytes,
+            record.response_body_sha256,
             record.response_blob_key,
             record.response_blob_url,
             record.archived_at,
@@ -117,6 +144,13 @@ class PostgresRecorder:
             orjson.dumps(record.chutes_trace).decode("utf-8"),
             record.error,
         )
+
+    def _compact_json_payloads(self, record: RawHTTPRecord) -> RawHTTPRecord:
+        if record.request_json is not None:
+            record.request_body = b""
+        if record.response_json is not None:
+            record.response_body = b""
+        return record
 
     async def _archive_inline_if_enabled(self, record: RawHTTPRecord) -> RawHTTPRecord:
         if not self.settings.archive_on_ingest or self.object_storage is None:
