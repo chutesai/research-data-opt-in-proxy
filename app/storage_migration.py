@@ -46,10 +46,16 @@ async def migrate_raw_http_records_to_compact_json(
                 request_id,
                 created_at
             FROM raw_http_records
-            WHERE request_body_format = 'bytes'
-               OR response_body_format = 'bytes'
-               OR (request_body_format = 'json' AND request_json IS NULL)
-               OR (response_body_format = 'json' AND response_json IS NULL)
+            WHERE (
+                    request_body_format = 'bytes'
+                 OR response_body_format = 'bytes'
+                 OR (request_body_format = 'json' AND request_json IS NULL)
+                 OR (response_body_format = 'json' AND response_json IS NULL)
+              )
+              AND NOT (
+                  (COALESCE(request_blob_url, '') LIKE 'mem://%' AND COALESCE(octet_length(request_body), 0) = 0)
+               OR (COALESCE(response_blob_url, '') LIKE 'mem://%' AND COALESCE(octet_length(response_body), 0) = 0)
+              )
             ORDER BY created_at ASC, request_id ASC
             LIMIT $1
             """,
