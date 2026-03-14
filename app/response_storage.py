@@ -391,6 +391,8 @@ class _StreamingResponseAccumulator:
     def build(self) -> NormalizedStoredResponse | None:
         if not self.saw_event:
             return None
+        if not self.choices:
+            return None
         if not self.done_seen and not any(
             choice.finish_reason is not None
             for choice in self.choices.values()

@@ -349,6 +349,49 @@ async def test_incomplete_stream_is_not_recorded(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_done_stream_without_choices_is_not_recorded(
+    settings_factory,
+    db_truncate,
+    db_fetch_value,
+):
+    await db_truncate()
+
+    stream_body = (
+        b'data: {"result":"data: {\\"id\\":\\"chatcmpl-empty\\",\\"object\\":\\"chat.completion.chunk\\",\\"created\\":1740000002,\\"model\\":\\"test-model\\",\\"choices\\":[]}\\n"}\n\n'
+        b'data: {"result":"data: [DONE]\\n"}\n\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            headers={"content-type": "text/event-stream"},
+            content=stream_body,
+        )
+
+    app = create_app(settings_factory(), upstream_transport=httpx.MockTransport(handler))
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "Qwen/Qwen2.5-7B-Instruct",
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+    assert resp.status_code == 200
+    assert "[DONE]" in resp.text
+    assert await db_fetch_value("SELECT COUNT(*) FROM raw_http_records") == 0
+    assert await db_fetch_value("SELECT COUNT(*) FROM anon_usage_traces") == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_non_stream_trace_envelope_is_unwrapped(
     settings_factory,
     db_truncate,

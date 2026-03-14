@@ -106,6 +106,22 @@ def test_normalize_response_for_storage_skips_incomplete_stream():
 
 
 @pytest.mark.unit
+def test_normalize_response_for_storage_skips_done_stream_without_choices():
+    body = (
+        b'data: {"id":"chatcmpl-empty","object":"chat.completion.chunk","created":1740000002,"model":"test-model","choices":[]}\n\n'
+        b'data: [DONE]\n\n'
+    )
+
+    normalized = normalize_response_for_storage(
+        body,
+        "text/event-stream",
+        observed_at=datetime.now(timezone.utc),
+    )
+
+    assert normalized is None
+
+
+@pytest.mark.unit
 def test_normalize_response_for_storage_keeps_plain_json():
     body = orjson.dumps(
         {
