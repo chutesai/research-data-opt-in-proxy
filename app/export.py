@@ -169,6 +169,7 @@ async def iter_raw_http_jsonl(
     limit: int | None = None,
     object_storage: ObjectStorage | None = None,
     resolve_archived_bodies: bool = False,
+    batch_size: int = 10,
 ) -> AsyncIterator[bytes]:
     remaining = limit if limit and limit > 0 else None
     cursor_created_at: datetime | None = None
@@ -176,14 +177,14 @@ async def iter_raw_http_jsonl(
 
     async with pool.acquire() as conn:
         while True:
-            batch_size = min(100, remaining) if remaining is not None else 100
+            fetch_size = min(batch_size, remaining) if remaining is not None else batch_size
             rows = await conn.fetch(
                 RAW_EXPORT_BATCH_QUERY,
                 start_time,
                 end_time,
                 cursor_created_at,
                 cursor_request_id,
-                batch_size,
+                fetch_size,
             )
             if not rows:
                 break
