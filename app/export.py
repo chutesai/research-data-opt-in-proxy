@@ -18,17 +18,35 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Streaming cursor query.  Fetches all columns needed for a JSONL row but
-# lets Python assemble the final JSON.  The key optimisation is using an
-# asyncpg portal-based cursor (prefetch N) so Postgres streams rows
-# incrementally instead of materialising the full result set.
-#
-# We deliberately exclude request_body / response_body (bytea, always
-# empty after compact-json migration) and read request_json / response_json
-# as text so we can splice them directly into the output without a
-# deserialize–reserialize round trip.
+# Scout query: lightweight cursor-based pagination over IDs and metadata.
+# Avoids decompressing large TOAST columns (request_json, response_json,
+# request_body, response_body) so the DB can serve thousands of rows per
+# second even when the table holds 100k+ rows with multi-KB JSON payloads.
 # ---------------------------------------------------------------------------
-CURSOR_QUERY = """\
+SCOUT_BATCH_QUERY = """\
+SELECT
+    request_id,
+    created_at
+FROM raw_http_records
+WHERE ($1::timestamptz IS NULL OR created_at >= $1)
+  AND ($2::timestamptz IS NULL OR created_at < $2)
+  AND (
+        $3::timestamptz IS NULL
+        OR created_at > $3
+        OR (created_at = $3 AND request_id > $4::uuid)
+      )
+ORDER BY created_at ASC, request_id ASC
+LIMIT $5
+"""
+
+# ---------------------------------------------------------------------------
+# Hydrate query: fetches all columns needed for a JSONL row by ID batch.
+# Uses request_json::text / response_json::text so the JSON arrives as
+# pre-serialised text — Python splices it directly into the output without
+# a full deserialize→reserialize round-trip.  Excludes request_body /
+# response_body (always empty after compact-json migration).
+# ---------------------------------------------------------------------------
+HYDRATE_QUERY = """\
 SELECT
     request_id,
     correlation_id,
@@ -63,18 +81,16 @@ SELECT
     chutes_trace,
     error
 FROM raw_http_records
-WHERE ($1::timestamptz IS NULL OR created_at >= $1)
-  AND ($2::timestamptz IS NULL OR created_at < $2)
+WHERE request_id = ANY($1::uuid[])
 ORDER BY created_at ASC, request_id ASC
 """
 
 
-def _cursor_row_to_jsonl(row: asyncpg.Record) -> bytes:
-    """Build a JSONL line from a cursor row.
+def _hydrate_row_to_jsonl(row: asyncpg.Record) -> bytes:
+    """Build a JSONL line from a hydrate-query row.
 
     ``request_json_text`` and ``response_json_text`` arrive as pre-serialised
-    text strings from Postgres, so we avoid a full deserialize + reserialize
-    cycle.
+    text strings, so we splice them directly without deserialize→reserialize.
     """
     record: dict[str, Any] = {
         "request_id": str(row["request_id"]),
@@ -117,6 +133,78 @@ def _cursor_row_to_jsonl(row: asyncpg.Record) -> bytes:
     return orjson.dumps(record)
 
 
+async def raw_row_to_jsonl(
+    row: asyncpg.Record,
+    *,
+    object_storage: ObjectStorage | None = None,
+    resolve_archived_bodies: bool = False,
+) -> bytes:
+    request_json = row["request_json"]
+    response_json = row["response_json"]
+    request_payload = bytes(row["request_body"])
+    response_payload = bytes(row["response_body"])
+
+    if request_json is None and resolve_archived_bodies and object_storage is not None:
+        if not request_payload and row["request_blob_url"]:
+            request_payload = await object_storage.get_bytes(
+                key=row["request_blob_key"],
+                url=row["request_blob_url"],
+            )
+    if response_json is None and resolve_archived_bodies and object_storage is not None:
+        if not response_payload and row["response_blob_url"]:
+            response_payload = await object_storage.get_bytes(
+                key=row["response_blob_key"],
+                url=row["response_blob_url"],
+            )
+
+    request_body_text, request_body_base64 = _decode_body(
+        request_payload,
+        json_value=request_json,
+    )
+    response_body_text, response_body_base64 = _decode_body(
+        response_payload,
+        json_value=response_json,
+    )
+
+    record = {
+        "request_id": str(row["request_id"]),
+        "correlation_id": str(row["correlation_id"]) if row["correlation_id"] else None,
+        "created_at": _to_iso(row["created_at"]),
+        "method": row["method"],
+        "path": row["path"],
+        "query_string": row["query_string"],
+        "upstream_url": row["upstream_url"],
+        "request_headers": _json_field(row["request_headers"]),
+        "request_body_text": request_body_text,
+        "request_body_base64": request_body_base64,
+        "request_body_format": row["request_body_format"],
+        "stored_request_content_type": row["stored_request_content_type"],
+        "request_body_size_bytes": row["request_body_size_bytes"],
+        "request_body_sha256": row["request_body_sha256"],
+        "request_blob_key": row["request_blob_key"],
+        "request_blob_url": row["request_blob_url"],
+        "response_status": row["response_status"],
+        "response_headers": _json_field(row["response_headers"]),
+        "response_body_text": response_body_text,
+        "response_body_base64": response_body_base64,
+        "response_body_format": row["response_body_format"],
+        "stored_response_content_type": row["stored_response_content_type"],
+        "response_body_size_bytes": row["response_body_size_bytes"],
+        "response_body_sha256": row["response_body_sha256"],
+        "response_blob_key": row["response_blob_key"],
+        "response_blob_url": row["response_blob_url"],
+        "archived_at": _to_iso(row["archived_at"]),
+        "archive_error": row["archive_error"],
+        "duration_ms": row["duration_ms"],
+        "client_ip": row["client_ip"],
+        "is_stream": row["is_stream"],
+        "upstream_invocation_id": row["upstream_invocation_id"],
+        "chutes_trace": _json_field(row["chutes_trace"]),
+        "error": row["error"],
+    }
+    return orjson.dumps(record)
+
+
 async def iter_raw_http_jsonl(
     pool: asyncpg.Pool,
     *,
@@ -125,39 +213,77 @@ async def iter_raw_http_jsonl(
     limit: int | None = None,
     object_storage: ObjectStorage | None = None,
     resolve_archived_bodies: bool = False,
-    cursor_prefetch: int = 50,
+    scout_batch_size: int = 200,
+    hydrate_batch_size: int = 20,
 ) -> AsyncIterator[bytes]:
-    """Stream JSONL rows using an asyncpg portal-based cursor.
+    """Stream JSONL rows using a two-phase scout/hydrate pattern.
 
-    A single SQL query selects all rows in order; asyncpg fetches them in
-    batches of ``cursor_prefetch`` via a server-side portal so memory stays
-    constant regardless of total row count.  Each row is serialised to JSON
-    in Python using ``orjson``.
+    Phase 1 (scout): lightweight cursor query fetches only ``request_id``
+    and ``created_at`` — no TOAST decompression.
+
+    Phase 2 (hydrate): for each batch of IDs, build the JSONL line
+    server-side in Postgres via ``json_build_object`` so only a single
+    text column traverses the wire.  Rows needing S3 blob resolution
+    fall back to Python-side serialisation.
     """
-    emitted = 0
+    remaining = limit if limit and limit > 0 else None
+    cursor_created_at: datetime | None = None
+    cursor_request_id: UUID | None = None
 
     async with pool.acquire() as conn:
-        async with conn.transaction():
-            stmt = await conn.prepare(CURSOR_QUERY)
-            async for row in stmt.cursor(
+        while True:
+            scout_size = (
+                min(scout_batch_size, remaining)
+                if remaining is not None
+                else scout_batch_size
+            )
+            scout_rows = await conn.fetch(
+                SCOUT_BATCH_QUERY,
                 start_time,
                 end_time,
-                prefetch=cursor_prefetch,
-            ):
-                if limit is not None and emitted >= limit:
-                    break
+                cursor_created_at,
+                cursor_request_id,
+                scout_size,
+            )
+            if not scout_rows:
+                break
+
+            # Process scouted IDs in hydration sub-batches
+            all_ids = [row["request_id"] for row in scout_rows]
+            for i in range(0, len(all_ids), hydrate_batch_size):
+                batch_ids = all_ids[i : i + hydrate_batch_size]
+
                 try:
-                    yield _cursor_row_to_jsonl(row)
-                    emitted += 1
+                    rows = await conn.fetch(HYDRATE_QUERY, batch_ids)
+                    for row in rows:
+                        try:
+                            yield _hydrate_row_to_jsonl(row)
+                        except Exception:
+                            rid = row["request_id"] if row else "unknown"
+                            logger.exception(
+                                "Failed to serialize row %s, skipping", rid,
+                            )
+                            yield orjson.dumps(
+                                {"_export_error": True, "request_id": str(rid)},
+                            )
                 except Exception:
-                    rid = row["request_id"] if row else "unknown"
                     logger.exception(
-                        "Failed to serialize row %s, skipping", rid,
+                        "Hydrate batch failed starting %s, skipping %d rows",
+                        batch_ids[0], len(batch_ids),
                     )
-                    yield orjson.dumps(
-                        {"_export_error": True, "request_id": str(rid)},
-                    )
-                    emitted += 1
+                    for bid in batch_ids:
+                        yield orjson.dumps(
+                            {"_export_error": True, "request_id": str(bid)},
+                        )
+
+            last = scout_rows[-1]
+            cursor_created_at = last["created_at"]
+            cursor_request_id = last["request_id"]
+
+            if remaining is not None:
+                remaining -= len(scout_rows)
+                if remaining <= 0:
+                    break
 
 
 async def export_raw_http_to_file(
