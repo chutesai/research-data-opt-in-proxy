@@ -40,11 +40,10 @@ LIMIT $5
 """
 
 # ---------------------------------------------------------------------------
-# Hydrate query: fetches all columns needed for a JSONL row by ID batch.
-# Uses request_json::text / response_json::text so the JSON arrives as
-# pre-serialised text — Python splices it directly into the output without
-# a full deserialize→reserialize round-trip.  Excludes request_body /
-# response_body (always empty after compact-json migration).
+# Hydrate query: fetches all columns by ID batch.  Uses request_json::text
+# and response_json::text so JSON arrives pre-serialised — Python splices
+# it into the output without deserialize→reserialize.  Excludes
+# request_body / response_body (always empty after compact-json migration).
 # ---------------------------------------------------------------------------
 HYDRATE_QUERY = """\
 SELECT
@@ -87,11 +86,7 @@ ORDER BY created_at ASC, request_id ASC
 
 
 def _hydrate_row_to_jsonl(row: asyncpg.Record) -> bytes:
-    """Build a JSONL line from a hydrate-query row.
-
-    ``request_json_text`` and ``response_json_text`` arrive as pre-serialised
-    text strings, so we splice them directly without deserialize→reserialize.
-    """
+    """Build a JSONL line from a HYDRATE_QUERY row."""
     record: dict[str, Any] = {
         "request_id": str(row["request_id"]),
         "correlation_id": (
