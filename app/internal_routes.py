@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hmac
 from datetime import datetime, timezone
+from typing import AsyncIterator
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.archive_worker import archive_small_batch
 from app.db import cleanup_old_records
-from app.export import export_raw_http_jsonl
+from app.export import iter_raw_http_jsonl
 from app.storage_migration import migrate_raw_http_records_to_compact_json
 
 
@@ -112,17 +113,20 @@ def create_internal_router() -> APIRouter:
             )
 
         object_storage = container.object_storage if resolve_archived_bodies else None
-        lines = await export_raw_http_jsonl(
-            container.db_pool,
-            start_time=start_dt,
-            end_time=end_dt,
-            limit=limit,
-            object_storage=object_storage,
-            resolve_archived_bodies=resolve_archived_bodies,
-        )
-        body = b"".join(line + b"\n" for line in lines)
-        return Response(
-            content=body,
+
+        async def _stream() -> AsyncIterator[bytes]:
+            async for line in iter_raw_http_jsonl(
+                container.db_pool,
+                start_time=start_dt,
+                end_time=end_dt,
+                limit=limit,
+                object_storage=object_storage,
+                resolve_archived_bodies=resolve_archived_bodies,
+            ):
+                yield line + b"\n"
+
+        return StreamingResponse(
+            _stream(),
             media_type="application/x-ndjson",
             headers={"cache-control": "no-store"},
         )

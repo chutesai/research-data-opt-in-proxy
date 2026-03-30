@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -12,6 +13,8 @@ import asyncpg
 import orjson
 
 from app.object_storage import ObjectStorage
+
+logger = logging.getLogger(__name__)
 
 
 RAW_EXPORT_BATCH_QUERY = """\
@@ -186,11 +189,17 @@ async def iter_raw_http_jsonl(
                 break
 
             for row in rows:
-                yield await raw_row_to_jsonl(
-                    row,
-                    object_storage=object_storage,
-                    resolve_archived_bodies=resolve_archived_bodies,
-                )
+                try:
+                    yield await raw_row_to_jsonl(
+                        row,
+                        object_storage=object_storage,
+                        resolve_archived_bodies=resolve_archived_bodies,
+                    )
+                except Exception:
+                    rid = row["request_id"] if row else "unknown"
+                    logger.exception("Failed to serialize row %s, skipping", rid)
+                    error_record = {"_export_error": True, "request_id": str(rid)}
+                    yield orjson.dumps(error_record)
 
             last_row = rows[-1]
             cursor_created_at = last_row["created_at"]

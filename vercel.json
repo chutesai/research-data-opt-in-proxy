@@ -12,6 +12,11 @@
       "dest": "api/index.py"
     }
   ],
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 300
+    }
+  },
   "crons": [
     {
       "path": "/internal/archive/run?limit=500",
