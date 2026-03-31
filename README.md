@@ -103,6 +103,11 @@ Required:
 - `DATABASE_URL` - Postgres connection string (required when any recording is enabled)
 - `ANONYMIZATION_HASH_SALT` - secret salt for SipHash token hashing (must be set; placeholder values are rejected)
 
+Production note:
+- The service now uses self-hosted Postgres 16 on Hetzner instead of Neon.
+- Remote deployments should use the shared `old_sandy` PgBouncer endpoint on port `6432`.
+- Neon stays online only as rollback safety until final sign-off.
+
 Main:
 - `UPSTREAM_BASE_URL` (default `https://llm.chutes.ai`)
 - `UPSTREAM_DISCOUNT_HEADER_NAME` (optional)
@@ -189,6 +194,12 @@ Run:
 
 ```bash
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Example production DSN:
+
+```bash
+DATABASE_URL=postgresql://<user>:<password>@94.130.222.43:6432/research_proxy?sslmode=require
 ```
 
 Health check:

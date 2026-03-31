@@ -140,6 +140,9 @@ CREATE INDEX IF NOT EXISTS anon_usage_traces_chat_id_idx ON anon_usage_traces (c
 async def create_pool(database_url: str) -> asyncpg.Pool:
     return await asyncpg.create_pool(
         dsn=database_url,
+        # PgBouncer transaction pooling is required in production, so
+        # asyncpg's statement cache must be disabled.
+        statement_cache_size=0,
         min_size=0,
         max_size=4,
         command_timeout=60,
